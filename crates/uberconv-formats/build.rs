@@ -31,21 +31,32 @@ fn main() {
     }
 
     let lib = prefix.join("lib");
-    let candidates = ["heif.lib", "libheif.a", "heif.lib"];
-    let linked = candidates.iter().find(|name| lib.join(name).is_file()).is_some()
-        || lib.join("libheif.so").is_file()
-        || lib.join("libheif.dylib").is_file();
-    if !linked {
+    let has = |name: &str| lib.join(name).is_file();
+    let msvc_static = has("heif.lib");
+    let unix_static = has("libheif.a");
+    let shared = has("libheif.so") || has("libheif.dylib");
+    if !(msvc_static || unix_static || shared) {
         println!("cargo:warning=no libheif library in {lib:?}; HEIC stays disabled");
         return;
     }
 
     println!("cargo:rustc-cfg=heic_libheif");
     println!("cargo:rustc-link-search=native={}", lib.display());
-    println!("cargo:rustc-link-lib=heif");
-    // libheif is C++; MSVC needs its runtime, and a static libheif pulls libde265 too.
-    println!("cargo:rustc-link-lib=de265");
-    if cfg!(target_env = "msvc") {
-        println!("cargo:rustc-link-lib=static=msvcprt");
+
+    if msvc_static {
+        // Static libheif is a C++ library: link it whole, plus the decoder it was
+        // built against and the C++ runtime. libde265 ships as `libde265.lib`, so
+        // the link name is `libde265`, not `de265`. Building the libs with /MT
+        // would drop the MSVCP140.dll dependency, but rustc links the dynamic
+        // CRT, so /MD builds of both are the ones that fit.
+        println!("cargo:rustc-link-lib=static=heif");
+        println!("cargo:rustc-link-lib=static=libde265");
+        println!("cargo:rustc-link-lib=msvcprt");
+    } else if unix_static {
+        println!("cargo:rustc-link-lib=static=heif");
+        println!("cargo:rustc-link-lib=de265");
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+    } else {
+        println!("cargo:rustc-link-lib=dylib=heif");
     }
 }

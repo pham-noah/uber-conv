@@ -120,10 +120,15 @@ Details worth knowing:
 * **HEIC** is input only (we read it, we don't write it). Two ways in, tried in
   that order: a bundled **libheif** when `UBERCONV_LIBHEIF_DIR` points at an
   install prefix at build time (`include/libheif/heif.h` plus `heif.lib` /
-  `libheif.a`), otherwise the **Windows Imaging Component** codec, which is
-  what Microsoft's free "HEIF Image Extensions" (plus the HEVC extension, for
-  HEVC-coded photos) provides — so Windows builds read HEIC with nothing to
+  `libheif.a` / `libheif.so`), otherwise the **Windows Imaging Component** codec,
+  which is what Microsoft's free "HEIF Image Extensions" (plus the HEVC extension,
+  for HEVC-coded photos) provides — so Windows builds read HEIC with nothing to
   bundle. Rotation carried by the container is applied by the decoder.
+  Both paths are tested: `scripts/build-libheif.sh` builds static libheif 1.19.8 +
+  libde265 1.1.0 on Windows, and with `UBERCONV_LIBHEIF_DIR` set the HEIC test
+  decodes the sample to identical 1280×854 pixels. That route adds ~22 MB of
+  static libraries and makes the exe depend on `MSVCP140.dll`; the default Windows
+  build (system codec) has neither cost.
 * Not supported: RAW photos, 7z/RAR.
 
 ## Build

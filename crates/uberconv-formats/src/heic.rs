@@ -82,9 +82,21 @@ mod libheif {
     }
 
     // heif_colorspace / heif_chroma / heif_channel values from heif.h.
+    // (interleaved_RGBA is 11; 12 is RRGGBB_BE, which is 16-bit and would read
+    // past the plane.)
     const HEIF_COLORSPACE_RGB: c_int = 1;
-    const HEIF_CHROMA_INTERLEAVED_RGBA: c_int = 12;
+    const HEIF_CHROMA_INTERLEAVED_RGBA: c_int = 11;
     const HEIF_CHANNEL_INTERLEAVED: c_int = 10;
+
+    // `struct heif_error` is returned *by value* (16 bytes on Win64), so it must be
+    // modelled as a struct — declaring these as returning `int` calls the hidden
+    // return-pointer ABI wrongly and crashes the caller.
+    #[repr(C)]
+    struct HeifError {
+        code: c_int,
+        subcode: c_int,
+        message: *const c_char,
+    }
 
     #[link(name = "heif")]
     extern "C" {
@@ -94,22 +106,22 @@ mod libheif {
             ctx: *mut HeifContext,
             filename: *const c_char,
             read_options: *const c_void,
-        ) -> c_int;
+        ) -> HeifError;
         fn heif_context_get_primary_image_handle(
             ctx: *mut HeifContext,
             handle: *mut *mut HeifImageHandle,
-        ) -> c_int;
+        ) -> HeifError;
         fn heif_image_handle_release(handle: *mut HeifImageHandle);
-        fn heif_image_handle_get_width(handle: *const HeifImageHandle) -> c_int;
-        fn heif_image_handle_get_height(handle: *const HeifImageHandle) -> c_int;
         fn heif_decode_image(
             handle: *const HeifImageHandle,
             out: *mut *mut HeifImage,
             colorspace: c_int,
             chroma: c_int,
             options: *const c_void,
-        ) -> c_int;
+        ) -> HeifError;
         fn heif_image_release(img: *mut HeifImage);
+        fn heif_image_get_width(img: *const HeifImage, channel: c_int) -> c_int;
+        fn heif_image_get_height(img: *const HeifImage, channel: c_int) -> c_int;
         fn heif_image_get_plane_readonly(
             img: *const HeifImage,
             channel: c_int,
@@ -117,8 +129,14 @@ mod libheif {
         ) -> *const u8;
     }
 
-    fn err(code: c_int, what: &str) -> Error {
-        Error::failed(format!("libheif: {what} failed (code {code})"))
+    fn err(e: HeifError, what: &str) -> Error {
+        let detail = if e.message.is_null() {
+            String::new()
+        } else {
+            let msg = unsafe { std::ffi::CStr::from_ptr(e.message) };
+            format!(": {}", msg.to_string_lossy())
+        };
+        Error::failed(format!("libheif: {what} failed (code {}{detail})", e.code))
     }
 
     pub fn decode(path: &Path) -> Result<image::RgbaImage> {
@@ -132,24 +150,32 @@ mod libheif {
             if ctx.is_null() {
                 return Err(Error::failed("libheif: out of memory"));
             }
-            let code = heif_context_read_from_file(ctx, c_path.as_ptr(), ptr::null());
-            if code != 0 {
-                heif_context_free(ctx);
-                return Err(err(code, "reading the file"));
-            }
-            let mut handle: *mut HeifImageHandle = ptr::null_mut();
-            let code = heif_context_get_primary_image_handle(ctx, &mut handle);
+            // The context owns the file data that the image handle still refers to,
+            // so it has to outlive decoding: free it only after the handle is gone.
+            let result = decode_in(ctx, &c_path);
             heif_context_free(ctx);
-            if code != 0 || handle.is_null() {
-                return Err(err(code, "the primary image"));
-            }
+            result
+        }
+    }
 
-            let (w, h) = (
-                heif_image_handle_get_width(handle),
-                heif_image_handle_get_height(handle),
-            );
+    /// Decodes the primary image of an already-opened context.
+    ///
+    /// # Safety
+    /// `ctx` must be a live libheif context; `path` a NUL-terminated C string.
+    unsafe fn decode_in(ctx: *mut HeifContext, path: &CString) -> Result<image::RgbaImage> {
+        let e = heif_context_read_from_file(ctx, path.as_ptr(), ptr::null());
+        if e.code != 0 {
+            return Err(err(e, "reading the file"));
+        }
+        let mut handle: *mut HeifImageHandle = ptr::null_mut();
+        let e = heif_context_get_primary_image_handle(ctx, &mut handle);
+        if e.code != 0 || handle.is_null() {
+            return Err(err(e, "the primary image"));
+        }
+
+        let img = {
             let mut img: *mut HeifImage = ptr::null_mut();
-            let code = heif_decode_image(
+            let e = heif_decode_image(
                 handle,
                 &mut img,
                 HEIF_COLORSPACE_RGB,
@@ -157,26 +183,33 @@ mod libheif {
                 ptr::null(),
             );
             heif_image_handle_release(handle);
-            if code != 0 || img.is_null() {
-                return Err(err(code, "decoding RGBA pixels"));
+            if e.code != 0 || img.is_null() {
+                return Err(err(e, "decoding RGBA pixels"));
             }
+            img
+        };
 
-            let mut stride: c_int = 0;
-            let plane = heif_image_get_plane_readonly(img, HEIF_CHANNEL_INTERLEAVED, &mut stride);
-            if plane.is_null() || w <= 0 || h <= 0 || stride < w * 4 {
-                heif_image_release(img);
-                return Err(Error::failed("libheif: no RGBA plane"));
-            }
-            let (w, h, stride) = (w as usize, h as usize, stride as usize);
-            let mut out = vec![0u8; w * h * 4];
-            for y in 0..h {
-                let src = std::slice::from_raw_parts(plane.add(y * stride), w * 4);
-                out[y * w * 4..(y + 1) * w * 4].copy_from_slice(src);
-            }
+        let mut stride: c_int = 0;
+        let plane = heif_image_get_plane_readonly(img, HEIF_CHANNEL_INTERLEAVED, &mut stride);
+        // The plane can be padded, so the row stride is what matters, and the
+        // decoded size can be smaller than the handle's (cropped) one.
+        let (w, h) = (
+            heif_image_get_width(img, HEIF_CHANNEL_INTERLEAVED),
+            heif_image_get_height(img, HEIF_CHANNEL_INTERLEAVED),
+        );
+        if plane.is_null() || w <= 0 || h <= 0 || stride < w * 4 {
             heif_image_release(img);
-            image::RgbaImage::from_raw(w as u32, h as u32, out)
-                .ok_or_else(|| Error::failed("libheif: decoded buffer has the wrong size"))
+            return Err(Error::failed("libheif: no RGBA plane"));
         }
+        let (w, h, stride) = (w as usize, h as usize, stride as usize);
+        let mut out = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let src = std::slice::from_raw_parts(plane.add(y * stride), w * 4);
+            out[y * w * 4..(y + 1) * w * 4].copy_from_slice(src);
+        }
+        heif_image_release(img);
+        image::RgbaImage::from_raw(w as u32, h as u32, out)
+            .ok_or_else(|| Error::failed("libheif: decoded buffer has the wrong size"))
     }
 }
 
