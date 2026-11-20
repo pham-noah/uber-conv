@@ -93,7 +93,7 @@ stitched into one bar.
 
 | Family | Formats | Backend |
 |---|---|---|
-| Image | PNG, JPEG, GIF, BMP, TIFF, WebP, ICO; **SVG** (input only); **AVIF** | `image` + libwebp (WebP is lossy, or lossless at quality 100); `resvg` for SVG; FFmpeg for AVIF |
+| Image | PNG, JPEG, GIF, BMP, TIFF, WebP, ICO; **SVG** and **HEIC** (input only); **AVIF** | `image` + libwebp (WebP is lossy, or lossless at quality 100); `resvg` for SVG; libheif or Windows' HEIF codec for HEIC; FFmpeg for AVIF |
 | Audio | MP3, WAV, FLAC, Ogg Vorbis, Opus, M4A, AAC | FFmpeg |
 | Video | MP4, MKV, WebM, MOV, AVI, plus video -> GIF and GIF -> MP4/WebM | FFmpeg |
 | Data | JSON, YAML, TOML, CSV | serde + csv (JSON is the hub; JSON <-> YAML streams) |
@@ -117,7 +117,14 @@ Details worth knowing:
   paths or `..` are rejected.
 * **AVIF** needs an FFmpeg build with libaom (encode) and dav1d (decode), which
   the static builds from `scripts/fetch-ffmpeg.sh` include. Alpha is not kept.
-* Not supported: **HEIC** (needs a bundled libheif), RAW photos, 7z/RAR.
+* **HEIC** is input only (we read it, we don't write it). Two ways in, tried in
+  that order: a bundled **libheif** when `UBERCONV_LIBHEIF_DIR` points at an
+  install prefix at build time (`include/libheif/heif.h` plus `heif.lib` /
+  `libheif.a`), otherwise the **Windows Imaging Component** codec, which is
+  what Microsoft's free "HEIF Image Extensions" (plus the HEVC extension, for
+  HEVC-coded photos) provides — so Windows builds read HEIC with nothing to
+  bundle. Rotation carried by the container is applied by the decoder.
+* Not supported: RAW photos, 7z/RAR.
 
 ## Build
 
@@ -220,28 +227,36 @@ New formats are one line in the `formats!` table in `uberconv-core/src/format.rs
 
 ## Status
 
-* All crates build and **45 tests pass** (engine, every converter, the CLI, and
+* All crates build and **46 tests pass** (engine, every converter, the CLI, and
   the app's file/settings logic). Fixtures for EXIF, PDF, Word and archives were
   made by independent tools (PIL, python-docx, Python's zipfile/tarfile; see
   `crates/uberconv-formats/tests/fixtures/make_fixtures.py`), and outputs were
   also checked with poppler, pypdf, python-docx, `zipfile`/`tarfile` and
-  `ffprobe`.
-* The GPUI app (0.2.2) was exercised under a virtual display: queueing folders,
-  3,000-file queues, per-file options (incl. the PDF page), undo, drag-reorder,
-  sorting, cancel, retry, ETA, light and dark themes.
-* **Not tried on real hardware**: native file dialogs, real drag-and-drop from
-  a file manager, "Show in folder", live light/dark switching, most keyboard
-  shortcuts (only Esc and Ctrl+Z were exercised), and desktop notifications.
-  The **Windows notification code is untested** (no Windows machine here).
-* GPUI offers **no screen-reader support** (no accessibility tree), and its
-  file dialogs can't be given a start folder, so neither is implemented.
+  `ffprobe`. The HEIC test decodes libheif's own sample and checks the size and
+  that the pixels aren't blank.
+* Exercised on real hardware (Windows 11): native file dialogs opening at the
+  remembered folder, a conversion run from the GUI (the output file lands on
+  disk), live light/dark switching, the settings overlay, per-file options,
+  Ctrl+O / Ctrl+Enter / Ctrl+, / Esc, and the CLI end-to-end
+  (`uberconv photo.heic out.png` -> 1280x854, and `out.jpg`).
+* The virtual-display pass covered the rest of the queue behaviour: queueing
+  folders, 3,000-file queues, per-file options (incl. the PDF page), undo,
+  drag-reorder, sorting, cancel, retry, ETA, both themes.
+* **Still untested**: real drag-and-drop from a file manager, "Show in folder",
+  the desktop notification toast, Ctrl+Z/Ctrl+K, and a 3,000-file queue on real
+  hardware.
+* GPUI 0.2.2 publishes **no accessibility tree** — a UI Automation capture of
+  the running app returns zero elements — so screen readers get nothing. That
+  needs an upstream GPUI (or fork) change, not app code.
+* File pickers now go through `rfd` rather than GPUI's own, because only `rfd`
+  can be given a start folder; that is what makes "remember the last folder"
+  possible.
 * On Linux, GPUI 0.2.x pulls in `xattr 0.2.3`, which doesn't compile against
   current `libc`. `vendor/xattr` is that crate with a one-line fix, wired in via
   `[patch.crates-io]` (see `vendor/README.md`).
 
 ## Ideas for next
 
-HEIC (bundle libheif), metadata copying (EXIF/ICC), all pages of a PDF at once,
-PDF text extraction, 7z/xz/bz2 archives, RAW photos, a plugin system
-(WASM/dylib), per-format presets, and replacing the FFmpeg sidecar with linked
-libav* if you want a single binary.
+Metadata copying (EXIF/ICC), all pages of a PDF at once, PDF text extraction,
+7z/xz/bz2 archives, RAW photos, a plugin system (WASM/dylib), per-format presets,
+and replacing the FFmpeg sidecar with linked libav* if you want a single binary.

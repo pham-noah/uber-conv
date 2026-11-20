@@ -3,9 +3,9 @@
 //! HEIC is HEVC-in-ISOBMFF; the `image` crate can't touch it, so there are two
 //! ways in, tried in this order:
 //!
-//! 1. **libheif** — bundled, cross-platform. Detected at build time through
+//! 1. **libheif** — cross-platform. Detected at build time through
 //!    `UBERCONV_LIBHEIF_DIR` (a directory holding `include/libheif/heif.h` and
-//!    `lib/heif.lib` | `lib/libheif.a`); see `scripts/build-libheif.sh`.
+//!    `lib/heif.lib` | `lib/libheif.a`).
 //! 2. **Windows Imaging Component** — present on every Windows box that has
 //!    Microsoft's "HEIF Image Extensions" (and, for HEVC-coded files, the HEVC
 //!    video extension). No build-time dependency, which is why Windows builds
@@ -34,8 +34,8 @@ pub fn available() -> bool {
 
 /// One-line explanation for the UI/CLI when HEIC is not decodable here.
 pub fn unavailable_reason() -> &'static str {
-    "HEIC needs libheif. Rebuild with UBERCONV_LIBHEIF_DIR pointing at a libheif \
-     install (see scripts/build-libheif.sh)."
+    "HEIC needs libheif: rebuild with UBERCONV_LIBHEIF_DIR pointing at a libheif \
+     install (see README, “HEIC”)."
 }
 
 /// Decode the primary image of a HEIC/HEIF file to 8-bit RGBA.
