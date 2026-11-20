@@ -9,6 +9,8 @@ use std::{
 
 use uberconv_core::{BatchEvent, BatchItem, CancelToken, Family, Format, Options};
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 const USAGE: &str = "\
 uberconv - convert anything to anything (that it knows how)
 
@@ -30,6 +32,7 @@ OPTIONS
       --crf <0-51>       video quality, lower is better (default 23)
       --page <N>         which PDF page to render (default 1)
   -h, --help
+  -V, --version
 ";
 
 fn main() -> ExitCode {
@@ -46,6 +49,10 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("uberconv {VERSION}");
         return Ok(());
     }
     let registry = uberconv_formats::default_registry();

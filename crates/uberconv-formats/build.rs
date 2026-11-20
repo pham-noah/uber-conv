@@ -1,17 +1,7 @@
-//! Optional bundled libheif.
-//!
-//! HEIC decoding on Linux/macOS (and on Windows when you would rather not rely
-//! on the Microsoft Store HEIF extension) needs libheif. Point
-//! `UBERCONV_LIBHEIF_DIR` at an install prefix and this script wires it up:
-//!
-//! ```text
-//! UBERCONV_LIBHEIF_DIR=C:/deps/libheif cargo build --release
-//! ```
-//!
-//! The directory must contain `include/libheif/heif.h` and, in `lib/`,
-//! `heif.lib` (MSVC), `libheif.a` or `libheif.so`/`libheif.dylib`.
-//! Without it nothing breaks: Windows falls back to the system codec and other
-//! platforms report that HEIC needs libheif.
+//! Links an optional bundled libheif when `UBERCONV_LIBHEIF_DIR` names an install
+//! prefix (`include/libheif/heif.h` plus `heif.lib`, `libheif.a` or
+//! `libheif.so`/`libheif.dylib`). Unset, Windows uses its system HEIF codec and
+//! other platforms report HEIC as unavailable.
 
 use std::path::PathBuf;
 
@@ -44,11 +34,8 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", lib.display());
 
     if msvc_static {
-        // Static libheif is a C++ library: link it whole, plus the decoder it was
-        // built against and the C++ runtime. libde265 ships as `libde265.lib`, so
-        // the link name is `libde265`, not `de265`. Building the libs with /MT
-        // would drop the MSVCP140.dll dependency, but rustc links the dynamic
-        // CRT, so /MD builds of both are the ones that fit.
+        // Static libheif is C++: link it with its decoder and the C++ runtime.
+        // libde265's file name gives the link name `libde265`, not `de265`.
         println!("cargo:rustc-link-lib=static=heif");
         println!("cargo:rustc-link-lib=static=libde265");
         println!("cargo:rustc-link-lib=msvcprt");

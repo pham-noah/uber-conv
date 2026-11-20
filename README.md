@@ -14,7 +14,7 @@ crates/
   uberconv-formats/  built-in converters (image, data, text, ffmpeg)
   uberconv-cli/      `uberconv` command line tool
   uberconv-app/      GPUI desktop app
-scripts/fetch-ffmpeg.sh
+scripts/fetch-ffmpeg.sh, scripts/build-libheif.sh
 ```
 
 ## Screenshots
@@ -27,8 +27,7 @@ scripts/fetch-ffmpeg.sh
 |---|---|---|
 | ![](assets/screenshots/converting.png) | ![](assets/screenshots/finished.png) | ![](assets/screenshots/settings.png) |
 
-(Captured from the real GPUI app under a virtual display, so there is no
-window title bar.)
+The real app under a virtual display, hence the missing title bar.
 
 ## Logo & design
 
@@ -45,7 +44,7 @@ meets WCAG AA contrast. Inter is bundled (SIL OFL, see
 `crates/uberconv-app/assets/fonts/Inter-LICENSE.txt`) so weights and spacing look
 the same everywhere.
 
-**What the app does**
+## The app
 
 * Drop files **or folders** (folders are walked; hidden files and unsupported types
   are skipped and reported). Files can also be passed on the command line /
@@ -75,7 +74,6 @@ the same everywhere.
   **drag to reorder** (grip on each card) and **sort** by name, size or type.
 * **ETA** in the footer ("5 of 6 done · 99% · ~1 s left").
 * Thin custom scrollbars for the queue and the settings panel.
-
 Icons are small embedded SVGs in `crates/uberconv-app/assets/icons/`.
 
 ## How it works
@@ -135,11 +133,11 @@ Details worth knowing:
 
 ## Build
 
-Prebuilt Windows binaries are attached to the [releases](https://github.com/pham-noah/uber-conv/releases)
-(`uberconv-app.exe`, `uberconv.exe`); drop `ffmpeg.exe` next to them for video and
-audio. Building from source needs a recent stable Rust: **1.92 or newer** (hayro 0.9 declares that). I
-developed on 1.91 with `cargo ... --ignore-rust-version`, which compiled fine, but
-1.92+ is the supported route.
+Prebuilt Windows binaries are on the [releases](https://github.com/pham-noah/uber-conv/releases)
+page (`uberconv-app.exe`, `uberconv.exe`); drop `ffmpeg.exe` next to them for audio
+and video.
+
+Building from source needs stable Rust **1.92 or newer** (declared by hayro 0.9).
 
 ```sh
 cargo test                       # core + formats + CLI
@@ -236,8 +234,8 @@ New formats are one line in the `formats!` table in `uberconv-core/src/format.rs
 
 ## Status
 
-* All crates build and **46 tests pass** (engine, every converter, the CLI, and
-  the app's file/settings logic). Fixtures for EXIF, PDF, Word and archives were
+* v0.1.0. All crates build and **46 tests pass** (engine, every converter, the
+  CLI, and the app's file/settings logic). Fixtures for EXIF, PDF, Word and archives were
   made by independent tools (PIL, python-docx, Python's zipfile/tarfile; see
   `crates/uberconv-formats/tests/fixtures/make_fixtures.py`), and outputs were
   also checked with poppler, pypdf, python-docx, `zipfile`/`tarfile` and
@@ -254,12 +252,10 @@ New formats are one line in the `formats!` table in `uberconv-core/src/format.rs
 * **Still untested**: real drag-and-drop from a file manager, "Show in folder",
   the desktop notification toast, Ctrl+Z/Ctrl+K, and a 3,000-file queue on real
   hardware.
-* GPUI 0.2.2 publishes **no accessibility tree** — a UI Automation capture of
-  the running app returns zero elements — so screen readers get nothing. That
-  needs an upstream GPUI (or fork) change, not app code.
-* File pickers now go through `rfd` rather than GPUI's own, because only `rfd`
-  can be given a start folder; that is what makes "remember the last folder"
-  possible.
+* GPUI 0.2.2 publishes **no accessibility tree** — UI Automation sees zero
+  elements — so screen readers get nothing; that needs an upstream GPUI change,
+  not app code. File pickers use `rfd` instead of GPUI's own, because only `rfd`
+  takes a start folder, which is what makes "remember the last folder" work.
 * On Linux, GPUI 0.2.x pulls in `xattr 0.2.3`, which doesn't compile against
   current `libc`. `vendor/xattr` is that crate with a one-line fix, wired in via
   `[patch.crates-io]` (see `vendor/README.md`).

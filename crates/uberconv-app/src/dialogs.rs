@@ -1,12 +1,6 @@
-//! Native file dialogs.
-//!
-//! GPUI 0.2's own `prompt_for_paths` cannot be given a starting folder, so
-//! "remember the last folder" is impossible with it. `rfd` wraps the same
-//! platform dialogs (`IFileOpenDialog` with `SetFolder` on Windows, NSOpenPanel
-//! on macOS, the XDG portal / GTK chooser on Linux) and does take one.
-//!
-//! Dialogs are modal and block, so they run on their own thread; the GPUI side
-//! awaits a channel instead of the main thread.
+//! Native file dialogs via `rfd`, because GPUI's own `prompt_for_paths` cannot be
+//! given a starting folder. Dialogs block, so each runs on a thread and the caller
+//! awaits a channel.
 
 use std::path::{Path, PathBuf};
 

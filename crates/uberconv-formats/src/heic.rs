@@ -1,18 +1,5 @@
-//! HEIC/HEIF decoding.
-//!
-//! HEIC is HEVC-in-ISOBMFF; the `image` crate can't touch it, so there are two
-//! ways in, tried in this order:
-//!
-//! 1. **libheif** — cross-platform. Detected at build time through
-//!    `UBERCONV_LIBHEIF_DIR` (a directory holding `include/libheif/heif.h` and
-//!    `lib/heif.lib` | `lib/libheif.a`).
-//! 2. **Windows Imaging Component** — present on every Windows box that has
-//!    Microsoft's "HEIF Image Extensions" (and, for HEVC-coded files, the HEVC
-//!    video extension). No build-time dependency, which is why Windows builds
-//!    can decode HEIC out of the box.
-//!
-//! Without either, `decode` returns an error naming the missing piece rather
-//! than a generic format failure.
+//! HEIC/HEIF decoding: libheif when `UBERCONV_LIBHEIF_DIR` was set at build time,
+//! otherwise the Windows Imaging Component (system HEIF codec).
 
 use std::path::Path;
 
@@ -32,7 +19,7 @@ pub fn available() -> bool {
     false
 }
 
-/// One-line explanation for the UI/CLI when HEIC is not decodable here.
+/// Why HEIC can't be decoded in this build.
 pub fn unavailable_reason() -> &'static str {
     "HEIC needs libheif: rebuild with UBERCONV_LIBHEIF_DIR pointing at a libheif \
      install (see README, “HEIC”)."
@@ -80,16 +67,12 @@ mod libheif {
         _private: [u8; 0],
     }
 
-    // heif_colorspace / heif_chroma / heif_channel values from heif.h.
-    // (interleaved_RGBA is 11; 12 is RRGGBB_BE, which is 16-bit and would read
-    // past the plane.)
+    // Values from heif.h: 11 is interleaved_RGBA (12 is 16-bit RRGGBB_BE).
     const HEIF_COLORSPACE_RGB: c_int = 1;
     const HEIF_CHROMA_INTERLEAVED_RGBA: c_int = 11;
     const HEIF_CHANNEL_INTERLEAVED: c_int = 10;
 
-    // `struct heif_error` is returned *by value* (16 bytes on Win64), so it must be
-    // modelled as a struct — declaring these as returning `int` calls the hidden
-    // return-pointer ABI wrongly and crashes the caller.
+    // Returned by value (hidden sret on Win64): modelling this as an `int` crashes.
     #[repr(C)]
     struct HeifError {
         code: c_int,
@@ -129,8 +112,7 @@ mod libheif {
     }
 
     fn err(e: HeifError, what: &str) -> Error {
-        // Code 11 (Plugin_loading_error) with a decode failure almost always means the
-        // libheif in use has no HEVC decoder, which is a packaging problem, not a bad file.
+        // Plugin_loading_error: this libheif has no HEVC decoder — a packaging problem.
         const PLUGIN_LOADING_ERROR: c_int = 11;
         if e.code == PLUGIN_LOADING_ERROR {
             return Error::failed(
@@ -148,7 +130,7 @@ mod libheif {
         Error::failed(format!("libheif: {what} failed (code {}{detail})", e.code))
     }
 
-    /// libheif takes a plain `char*` path: UTF-8 on Windows, raw bytes on unix.
+    /// libheif takes a `char*` path: UTF-8 on Windows, raw bytes on unix.
     fn path_cstring(path: &Path) -> Result<CString> {
         #[cfg(windows)]
         {
@@ -175,18 +157,15 @@ mod libheif {
             if ctx.is_null() {
                 return Err(Error::failed("libheif: out of memory"));
             }
-            // The context owns the file data that the image handle still refers to,
-            // so it has to outlive decoding: free it only after the handle is gone.
+            // The handle borrows the context's file data, so free the context last.
             let result = decode_in(ctx, &c_path);
             heif_context_free(ctx);
             result
         }
     }
 
-    /// Decodes the primary image of an already-opened context.
-    ///
     /// # Safety
-    /// `ctx` must be a live libheif context; `path` a NUL-terminated C string.
+    /// `ctx` must be live and `path` NUL-terminated.
     unsafe fn decode_in(ctx: *mut HeifContext, path: &CString) -> Result<image::RgbaImage> {
         let e = heif_context_read_from_file(ctx, path.as_ptr(), ptr::null());
         if e.code != 0 {
@@ -216,8 +195,7 @@ mod libheif {
 
         let mut stride: c_int = 0;
         let plane = heif_image_get_plane_readonly(img, HEIF_CHANNEL_INTERLEAVED, &mut stride);
-        // The plane can be padded, so the row stride is what matters, and the
-        // decoded size can be smaller than the handle's (cropped) one.
+        // Rows can be padded, and the decoded size can be smaller than the handle's.
         let (w, h) = (
             heif_image_get_width(img, HEIF_CHANNEL_INTERLEAVED),
             heif_image_get_height(img, HEIF_CHANNEL_INTERLEAVED),
@@ -266,7 +244,7 @@ mod wic {
     }
 
     pub fn decode(path: &Path) -> Result<image::RgbaImage> {
-        // Workers are not COM-initialised; S_FALSE (already initialised) is fine too.
+        // Worker threads aren't COM-initialised; S_FALSE (already done) is fine.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 

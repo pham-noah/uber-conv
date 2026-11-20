@@ -12,7 +12,6 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/pham-noah/uber-conv"
-homepage = "https://github.com/pham-noah/uber-conv"
 
 [profile.release]
 opt-level = 3
