@@ -5,6 +5,8 @@
 A file converter in Rust with a GPUI desktop UI and a CLI. Images, audio,
 video, data files and text documents, with FFmpeg bundled as a sidecar.
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 ```
 assets/logo/        logo: SVG sources, PNGs (16-1024px) and uberconv.ico
 crates/
@@ -133,7 +135,9 @@ Details worth knowing:
 
 ## Build
 
-Needs a recent stable Rust: **1.92 or newer** (hayro 0.9 declares that). I
+Prebuilt Windows binaries are attached to the [releases](https://github.com/pham-noah/uber-conv/releases)
+(`uberconv-app.exe`, `uberconv.exe`); drop `ffmpeg.exe` next to them for video and
+audio. Building from source needs a recent stable Rust: **1.92 or newer** (hayro 0.9 declares that). I
 developed on 1.91 with `cargo ... --ignore-rust-version`, which compiled fine, but
 1.92+ is the supported route.
 
@@ -265,3 +269,10 @@ New formats are one line in the `formats!` table in `uberconv-core/src/format.rs
 Metadata copying (EXIF/ICC), all pages of a PDF at once, PDF text extraction,
 7z/xz/bz2 archives, RAW photos, a plugin system (WASM/dylib), per-format presets,
 and replacing the FFmpeg sidecar with linked libav* if you want a single binary.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE). Bundled FFmpeg builds keep their own licence
+(GPL builds are GPL; see `scripts/fetch-ffmpeg.sh`), and the logo in `assets/logo/`
+is covered by the same Apache-2.0 terms.
+
