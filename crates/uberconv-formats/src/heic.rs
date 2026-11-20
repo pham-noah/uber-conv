@@ -61,7 +61,6 @@ pub fn decode(path: &Path) -> Result<image::RgbaImage> {
 mod libheif {
     use std::{
         ffi::{c_char, c_int, c_void, CString},
-        os::windows::ffi::OsStrExt,
         path::Path,
         ptr,
     };
@@ -130,6 +129,16 @@ mod libheif {
     }
 
     fn err(e: HeifError, what: &str) -> Error {
+        // Code 11 (Plugin_loading_error) with a decode failure almost always means the
+        // libheif in use has no HEVC decoder, which is a packaging problem, not a bad file.
+        const PLUGIN_LOADING_ERROR: c_int = 11;
+        if e.code == PLUGIN_LOADING_ERROR {
+            return Error::failed(
+                "HEIC: libheif could not load a decoder for this file — HEVC-in-HEIC needs \
+                 libde265 (e.g. the libheif-plugin-libde265 package), or use a libheif build \
+                 that bundles it.",
+            );
+        }
         let detail = if e.message.is_null() {
             String::new()
         } else {
@@ -139,11 +148,27 @@ mod libheif {
         Error::failed(format!("libheif: {what} failed (code {}{detail})", e.code))
     }
 
+    /// libheif takes a plain `char*` path: UTF-8 on Windows, raw bytes on unix.
+    fn path_cstring(path: &Path) -> Result<CString> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let utf8 = String::from_utf16_lossy(&wide[..wide.len() - 1]);
+            return CString::new(utf8).map_err(|_| Error::failed("path contains a NUL byte"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            return CString::new(path.as_os_str().as_bytes())
+                .map_err(|_| Error::failed("path contains a NUL byte"));
+        }
+        #[allow(unreachable_code)]
+        Err(Error::failed("unsupported platform"))
+    }
+
     pub fn decode(path: &Path) -> Result<image::RgbaImage> {
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        // libheif wants a UTF-8 path on every platform; build one from the wide form.
-        let utf8 = String::from_utf16_lossy(&wide[..wide.len() - 1]);
-        let c_path = CString::new(utf8).map_err(|_| Error::failed("path contains a NUL byte"))?;
+        let c_path = path_cstring(path)?;
 
         unsafe {
             let ctx = heif_context_alloc();
