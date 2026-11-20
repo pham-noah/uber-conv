@@ -1,0 +1,12 @@
+[package]
+name = "uberconv-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "uberconv"
+path = "src/main.rs"
+
+[dependencies]
+uberconv-core = { path = "../uberconv-core" }
+uberconv-formats = { path = "../uberconv-formats" }

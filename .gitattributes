@@ -1,0 +1,16 @@
+# Line endings: LF in the repo and in the working tree, on every OS, so the
+# same source compiles and diffs identically everywhere.
+* text=auto eol=lf
+
+# Binary fixtures and assets: never normalise, never diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.heic binary
+*.docx binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.ttf binary
+*.otf binary

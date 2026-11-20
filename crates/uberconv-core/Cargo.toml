@@ -1,0 +1,8 @@
+[package]
+name = "uberconv-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = "1"
+tempfile = "3"
