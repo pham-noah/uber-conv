@@ -1,21 +1,24 @@
 //! PDF <-> images.
 //!
 //! * PDF -> image: rendered with `hayro` (pure Rust, CPU) on a white page.
-//!   One page per conversion; pick it with `Options::pdf_page`.
-//! * image -> PDF: a single-page PDF sized to the image at 150 dpi. JPEGs are
-//!   embedded as-is (no re-encoding); everything else is stored Flate-compressed,
-//!   with a soft mask when the image has transparency.
+//!   One page per conversion (`Options::pdf_page`), or every page at once with
+//!   `Options::pdf_all_pages` (page 1 keeps the planned name, the rest are
+//!   `name-002.png`, `name-003.png`, …).
+//! * image -> PDF: a PDF sized to the image at 150 dpi. JPEGs are embedded as-is
+//!   (no re-encoding); everything else is stored Flate-compressed, with a soft
+//!   mask when the image has transparency. [`images_to_pdf`] puts several images
+//!   into one document, one page each.
 
 use std::{
     fs::{self, File},
     io::{BufReader, Write},
     panic::{catch_unwind, AssertUnwindSafe},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use flate2::{write::ZlibEncoder, Compression};
 use image::{DynamicImage, GenericImageView};
-use uberconv_core::{Context, Converter, Cost, Edge, Error, Format, Job, Result};
+use uberconv_core::{Context, Converter, Cost, Edge, Error, Family, Format, Job, Result};
 
 use crate::image_conv::{decode, exif_orientation, save_image};
 
@@ -62,30 +65,62 @@ impl Converter for PdfConverter {
 // ───────────────────────── PDF -> image ─────────────────────────
 
 fn pdf_to_image(job: &Job<'_>, ctx: &Context) -> Result<()> {
-    ctx.report(0.05);
+    ctx.report(0.02);
     let data = fs::read(job.input)?;
-    let wanted = ctx.options.pdf_page.max(1) as usize;
     let max_dim = ctx.options.image_max_dimension;
+    let all_pages = ctx.options.pdf_all_pages;
+    let wanted = ctx.options.pdf_page.max(1) as usize;
 
     // Rendering untrusted PDFs can hit bugs in any renderer; never let one take
     // the whole app down.
-    let rendered = catch_unwind(AssertUnwindSafe(|| render_page(data, wanted, max_dim)))
+    let pdf = catch_unwind(AssertUnwindSafe(|| open_pdf(data)))
+        .map_err(|_| Error::failed("the PDF renderer crashed on this file"))??;
+    let page_count = pdf.pages().len();
+    if page_count == 0 {
+        return Err(Error::failed("this PDF has no pages"));
+    }
+    ctx.cancel.check()?;
+
+    let first_page = if all_pages { 1 } else { wanted };
+    let rendered = catch_unwind(AssertUnwindSafe(|| render_page(&pdf, first_page, max_dim)))
         .map_err(|_| Error::failed("the PDF renderer crashed on this file"))??;
     ctx.cancel.check()?;
-    ctx.report(0.8);
-
+    ctx.report(0.4);
     save_image(rendered, job.to, job.output, ctx)?;
+
+    if all_pages {
+        // Pages 2..n land beside page 1, zero-padded so they sort in order.
+        let stem = job.output.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let ext = job.output.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+        let dir = job.output.parent().map(Path::to_path_buf).unwrap_or_default();
+        for n in 2..=page_count {
+            ctx.cancel.check()?;
+            let rendered = catch_unwind(AssertUnwindSafe(|| render_page(&pdf, n, max_dim)))
+                .map_err(|_| Error::failed(format!("the PDF renderer crashed on page {n}")))?;
+            let out = dir.join(format!("{stem}-{n:03}.{ext}"));
+            save_image(rendered?, job.to, &out, ctx)?;
+            ctx.report(0.4 + 0.6 * n as f32 / page_count as f32);
+        }
+    }
     ctx.report(1.0);
     Ok(())
 }
 
-fn render_page(data: Vec<u8>, page_number: usize, max_dim: Option<u32>) -> Result<DynamicImage> {
-    use hayro::{hayro_interpret::InterpreterSettings, hayro_syntax::Pdf, PixmapSettings, RenderCache, RenderSettings};
+fn open_pdf(data: Vec<u8>) -> Result<hayro::hayro_syntax::Pdf> {
+    hayro::hayro_syntax::Pdf::new(data)
+        .map_err(|e| Error::failed(format!("could not open the PDF (encrypted or damaged?): {e:?}")))
+}
 
-    let pdf = Pdf::new(data).map_err(|e| Error::failed(format!("could not open the PDF (encrypted or damaged?): {e:?}")))?;
+fn render_page(pdf: &hayro::hayro_syntax::Pdf, page_number: usize, max_dim: Option<u32>) -> Result<DynamicImage> {
+    use hayro::{hayro_interpret::InterpreterSettings, PixmapSettings, RenderCache, RenderSettings};
+
     let pages = pdf.pages();
     let page = pages.get(page_number - 1).ok_or_else(|| {
-        Error::failed(format!("this PDF has {} page{}, page {page_number} doesn't exist", pages.len(), if pages.len() == 1 { "" } else { "s" }))
+        Error::failed(format!(
+            "this PDF has {} page{}, page {page_number} doesn't exist",
+            pages.len(),
+            if pages.len() == 1 { "" } else { "s" }
+        ))
     })?;
 
     let (w, h) = page.render_dimensions();
@@ -171,30 +206,68 @@ fn embed_pixels(img: DynamicImage) -> Result<Embedded> {
 
 fn image_to_pdf(job: &Job<'_>, ctx: &Context) -> Result<()> {
     ctx.report(0.1);
-    let embedded = match (job.from == Format::Jpeg).then(|| jpeg_passthrough(job.input)).flatten() {
-        Some(e) => e,
-        None => {
-            // decode() already applies EXIF orientation
-            embed_pixels(decode(job.from, job.input, ctx)?)?
-        }
-    };
+    let embedded = embed_one(job.from, job.input, ctx)?;
     ctx.cancel.check()?;
     ctx.report(0.7);
-    fs::write(job.output, build_pdf(&embedded))?;
+    fs::write(job.output, build_pdf(&[embedded]))?;
     ctx.report(1.0);
     Ok(())
 }
 
-/// Assemble a one-page PDF around `img`.
-fn build_pdf(img: &Embedded) -> Vec<u8> {
-    // Page size in points, capped at the 200 inch PDF limit.
-    let mut pt_w = img.width as f32 * 72.0 / DPI;
-    let mut pt_h = img.height as f32 * 72.0 / DPI;
-    let cap = 14400.0 / pt_w.max(pt_h);
-    if cap < 1.0 {
-        pt_w *= cap;
-        pt_h *= cap;
+fn embed_one(from: Format, path: &Path, ctx: &Context) -> Result<Embedded> {
+    if from == Format::Jpeg {
+        if let Some(e) = jpeg_passthrough(path) {
+            return Ok(e);
+        }
     }
+    // decode() already applies EXIF orientation
+    embed_pixels(decode(from, path, ctx)?)
+}
+
+/// Assemble several images into one PDF: one page per image, in the order given.
+///
+/// Not part of the conversion graph (the graph is one input to one output, this
+/// is many to one), so callers that want a single document use this directly:
+/// the CLI's `--combine` flag and the app's "Combine into PDF".
+pub fn images_to_pdf(inputs: &[PathBuf], output: &Path, ctx: &Context) -> Result<()> {
+    if inputs.is_empty() {
+        return Err(Error::failed("nothing to combine"));
+    }
+    let mut pages = Vec::with_capacity(inputs.len());
+    for (i, path) in inputs.iter().enumerate() {
+        ctx.cancel.check()?;
+        let from = Format::from_path(path)
+            .ok_or_else(|| Error::failed(format!("{}: can't tell the input format from its extension", path.display())))?;
+        if from.family() != Family::Image && from != Format::Pdf {
+            return Err(Error::failed(format!("{}: only images (and PDF pages) can go into a PDF", path.display())));
+        }
+        if from == Format::Pdf {
+            return Err(Error::failed(format!("{}: combining PDFs is not supported yet", path.display())));
+        }
+        pages.push(embed_one(from, path, ctx)?);
+        ctx.report((i + 1) as f32 / (inputs.len() + 1) as f32);
+    }
+    fs::write(output, build_pdf(&pages))?;
+    ctx.report(1.0);
+    Ok(())
+}
+
+/// Assemble a PDF with one page per image.
+fn build_pdf(images: &[Embedded]) -> Vec<u8> {
+    // Page size in points, capped at the 200 inch PDF limit.
+    let sizes: Vec<(f32, f32)> = images
+        .iter()
+        .map(|img| {
+            let mut pt_w = img.width as f32 * 72.0 / DPI;
+            let mut pt_h = img.height as f32 * 72.0 / DPI;
+            let cap = 14400.0 / pt_w.max(pt_h);
+            if cap < 1.0 {
+                pt_w *= cap;
+                pt_h *= cap;
+            }
+            (pt_w, pt_h)
+        })
+        .collect();
 
     let mut out: Vec<u8> = Vec::new();
     let mut offsets: Vec<usize> = Vec::new();
@@ -213,47 +286,65 @@ fn build_pdf(img: &Embedded) -> Vec<u8> {
         b
     };
 
-    let has_mask = img.soft_mask.is_some();
-    // 1 Catalog, 2 Pages, 3 Page, 4 Contents, 5 Image, [6 SMask], last Info
-    object(&mut out, &mut offsets, b"<< /Type /Catalog /Pages 2 0 R >>");
-    object(&mut out, &mut offsets, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
-    object(
-        &mut out,
-        &mut offsets,
-        format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pt_w:.2} {pt_h:.2}] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
-        )
-        .as_bytes(),
-    );
-    let content = format!("q {pt_w:.2} 0 0 {pt_h:.2} 0 0 cm /Im0 Do Q");
-    object(&mut out, &mut offsets, &stream(String::new(), content.as_bytes()));
+    // Object ids: 1 Catalog, 2 Pages, then (page, contents, image[, smask]) per
+    // page, then Info. They are emitted in exactly that order, so the ids line up.
+    let mut next = 3;
+    let mut ids: Vec<(usize, usize, usize, Option<usize>)> = Vec::with_capacity(images.len());
+    for img in images {
+        let smask = img.soft_mask.as_ref().map(|_| next + 3);
+        ids.push((next, next + 1, next + 2, smask));
+        next += if smask.is_some() { 4 } else { 3 };
+    }
+    let info_id = next;
 
-    let smask = if has_mask { " /SMask 6 0 R" } else { "" };
+    object(&mut out, &mut offsets, b"<< /Type /Catalog /Pages 2 0 R >>");
+    let kids: Vec<String> = ids.iter().map(|(page, ..)| format!("{page} 0 R")).collect();
     object(
         &mut out,
         &mut offsets,
-        &stream(
-            format!(
-                "/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace {} /BitsPerComponent 8 {}{}",
-                img.width, img.height, img.color_space, img.filter, smask
-            ),
-            &img.data,
-        ),
+        format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), images.len()).as_bytes(),
     );
-    if let Some(mask) = &img.soft_mask {
+
+    for (i, img) in images.iter().enumerate() {
+        let (_, content_id, image_id, smask_id) = ids[i];
+        let (pt_w, pt_h) = sizes[i];
+        object(
+            &mut out,
+            &mut offsets,
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pt_w:.2} {pt_h:.2}] /Resources << /XObject << /Im0 {image_id} 0 R >> >> /Contents {content_id} 0 R >>"
+            )
+            .as_bytes(),
+        );
+        let content = format!("q {pt_w:.2} 0 0 {pt_h:.2} 0 0 cm /Im0 Do Q");
+        object(&mut out, &mut offsets, &stream(String::new(), content.as_bytes()));
+
+        let smask = if smask_id.is_some() { format!(" /SMask {} 0 R", smask_id.unwrap()) } else { String::new() };
         object(
             &mut out,
             &mut offsets,
             &stream(
                 format!(
-                    "/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode",
-                    img.width, img.height
+                    "/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace {} /BitsPerComponent 8 {}{}",
+                    img.width, img.height, img.color_space, img.filter, smask
                 ),
-                mask,
+                &img.data,
             ),
         );
+        if let Some(mask) = &img.soft_mask {
+            object(
+                &mut out,
+                &mut offsets,
+                &stream(
+                    format!(
+                        "/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode",
+                        img.width, img.height
+                    ),
+                    mask,
+                ),
+            );
+        }
     }
-    let info_id = offsets.len() + 1;
     object(&mut out, &mut offsets, b"<< /Producer (uberconv) >>");
 
     let xref_at = out.len();

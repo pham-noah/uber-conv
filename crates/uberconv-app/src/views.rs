@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use gpui::{
     div, linear_color_stop, linear_gradient, list, prelude::*, px, relative, rgb, AnyElement, Context,
-    ExternalPaths, FontWeight, ListState, ScrollHandle, SharedString, Window, WindowAppearance,
+    ExternalPaths, FontWeight, ListState, MouseButton, ScrollHandle, SharedString, Window, WindowAppearance,
 };
 use uberconv_core::{Family, Format};
 
@@ -224,7 +224,7 @@ impl ConverterApp {
         let chips: Vec<AnyElement> = ranked
             .into_iter()
             .map(|(fmt, n)| {
-                let all_selected = eligible.iter().all(|i| i.target == Some(fmt));
+                let all_selected = eligible.iter().all(|i| i.is_selected(fmt));
                 format_chip(SharedString::from(format!("bulk-{}", fmt.ext())), fmt, all_selected)
                     .tooltip(tip(format!(
                         "Convert {n} of {total} file{} to {}",
@@ -388,12 +388,14 @@ impl ConverterApp {
             meta.push(files::human_size(sz));
         }
 
-        let plan = match (item.from, item.target) {
+        let plan = match (item.from, item.primary()) {
             (Some(f), Some(t)) => self.registry.plan(f, t),
             _ => None,
         };
         let in_flight = item.in_flight();
         let done = matches!(item.state, State::Done { .. });
+        let multi_out = item.selected.len() > 1;
+        let picked = self.picked == Some(item.id);
         let relevant = Relevant::of(item);
         let has_custom = item.opts.is_some();
         let drag_label = SharedString::from(file_name.clone());
@@ -407,6 +409,9 @@ impl ConverterApp {
             }
             State::Ready if item.targets.is_empty() => {
                 (0.0, "Nothing to convert this to".to_string(), th::bad(), Some("icons/alert.svg"))
+            }
+            State::Ready if item.selected.is_empty() => {
+                (0.0, "Pick at least one format".to_string(), th::muted(), Some("icons/alert.svg"))
             }
             State::Ready => (0.0, "Ready to convert".to_string(), th::muted(), None),
             State::Queued => (0.0, "Queued".to_string(), th::muted(), Some("icons/clock.svg")),
@@ -441,6 +446,38 @@ impl ConverterApp {
             _ => None,
         };
 
+        // With several outputs the single line becomes a per-format tally.
+        let status = if multi_out {
+            match &item.state {
+                State::Done { .. } => format!("Saved {} files", item.parts.len()),
+                State::Failed(msg) => msg.lines().next().unwrap_or("Conversion failed").to_string(),
+                State::Running(_) | State::Queued => {
+                    if item.parts.is_empty() {
+                        format!("Converting to {} formats…", item.selected.len())
+                    } else {
+                        item.parts
+                            .iter()
+                            .map(|p| {
+                                let state = match &p.state {
+                                    State::Queued => "queued".to_string(),
+                                    State::Running(x) => format!("{}%", (*x * 100.0) as u32),
+                                    State::Done { .. } => "done".to_string(),
+                                    State::Failed(_) => "failed".to_string(),
+                                    State::Cancelled => "cancelled".to_string(),
+                                    State::Ready => "…".to_string(),
+                                };
+                                format!("{} {state}", p.target.name())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    }
+                }
+                _ => status,
+            }
+        } else {
+            status
+        };
+
         // Format chips, grouped by family when the list spans several.
         let mut groups: Vec<(Family, Vec<Format>)> = Vec::new();
         for &f in &item.targets {
@@ -464,10 +501,14 @@ impl ConverterApp {
                         format_chip(
                             SharedString::from(format!("chip-{id}-{}", fmt.ext())),
                             fmt,
-                            item.target == Some(fmt),
+                            item.is_selected(fmt),
                         )
-                        .tooltip(tip(route))
-                        .on_click(cx.listener(move |this, _, _, cx| this.set_target(id, fmt, cx)))
+                        .tooltip(tip(if item.is_selected(fmt) {
+                            format!("{route}\nClick to drop this output")
+                        } else {
+                            format!("{route}\nClick to add this output — a file can be converted to several formats at once")
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_target(id, fmt, cx)))
                         .into_any_element()
                     })
                     .collect();
@@ -593,7 +634,9 @@ impl ConverterApp {
             .rounded_xl()
             .bg(th::panel())
             .border_1()
-            .border_color(th::line())
+            .when(picked, |d| d.border_color(th::with_alpha(th::VIOLET, 0xaa)))
+            .when(!picked, |d| d.border_color(th::line()))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.pick(id, cx)))
             .drag_over::<DraggedItem>(|s, _, _, _| s.border_color(rgb(th::CYAN)))
             .on_drop(cx.listener(move |this, dragged: &DraggedItem, _, cx| this.move_item(dragged.id, id, cx)))
             // header row
@@ -875,6 +918,34 @@ impl ConverterApp {
             .when(!self.has_finished(), |b| b.opacity(0.4))
             .when(self.has_finished(), |b| b.on_click(cx.listener(|this, _, _, cx| this.clear_finished(cx))));
 
+        // What to do next with the result: both only matter once a batch has run.
+        let failed_count = self.items.iter().filter(|i| matches!(i.state, State::Failed(_))).count();
+        let open_folder = (!self.busy && self.summary.is_some())
+            .then(|| {
+                ghost_button("open-folder", "Open folder", "icons/folder.svg")
+                    .tooltip(tip("Show the converted files in Explorer"))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_output_folder(cx)))
+            })
+            .filter(|_| !matches!(self.settings.output, OutputMode::NextToSource) || self.has_finished());
+        let retry = (failed_count > 0 && !self.busy).then(|| {
+            text_button(
+                SharedString::from("retry-failed"),
+                format!("Retry {failed_count} failed"),
+                Some("icons/retry.svg"),
+                "Convert the files that failed again",
+            )
+            .text_color(th::warn())
+            .on_click(cx.listener(|this, _, _, cx| this.retry_failed(cx)))
+        });
+
+        // Many images, one document: the reverse of PDF -> image.
+        let image_count = self.items.iter().filter(|i| i.from.is_some_and(|f| f.family() == Family::Image)).count();
+        let combine = (image_count >= 2 && !self.busy).then(|| {
+            ghost_button("combine-pdf", format!("Combine {image_count} into PDF"), "icons/layers.svg")
+                .tooltip(tip("One page per image, in queue order"))
+                .on_click(cx.listener(|this, _, _, cx| this.combine_into_pdf(cx)))
+        });
+
         let main_button: AnyElement = if self.busy {
             danger_button("cancel-all", "Cancel all", "icons/stop.svg")
                 .tooltip(tip(format!("Stop every running and queued file  ({k}.)")))
@@ -889,7 +960,17 @@ impl ConverterApp {
                 .into_any_element()
         };
 
-        div().flex().items_center().gap_2().child(left).child(div().flex_1()).child(clear).child(main_button)
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(left)
+            .child(div().flex_1())
+            .children(retry)
+            .children(combine)
+            .children(open_folder)
+            .child(clear)
+            .child(main_button)
     }
 
     // ───────────────────────── settings panel ─────────────────────────
@@ -1010,6 +1091,70 @@ impl ConverterApp {
                 .collect(),
         );
 
+        // Preset chips: one click sets quality, size, bitrate and CRF together.
+        let mut preset_chips: Vec<AnyElement> = Vec::new();
+        let builtin_names: Vec<String> = crate::settings::builtin_presets().iter().map(|p| p.name.clone()).collect();
+        for p in self.presets() {
+            let name = p.name.clone();
+            let active = p.matches(s);
+            let label = format!("{} · {}", p.name, p.describe());
+            preset_chips.push(
+                seg_button(SharedString::from(format!("preset-{name}")), label, active)
+                    .tooltip(tip(format!(
+                        "Quality {}, {} px{}",
+                        p.image_quality,
+                        p.image_max_dimension.map(|d| d.to_string()).unwrap_or_else(|| "original".into()),
+                        if builtin_names.contains(&p.name) { "" } else { " (saved by you)" }
+                    )))
+                    .on_click(cx.listener(move |this, _, _, cx| this.apply_preset(name.clone(), cx)))
+                    .into_any_element(),
+            );
+        }
+        let user_presets: Vec<AnyElement> = s
+            .presets
+            .iter()
+            .map(|p| {
+                let name = p.name.clone();
+                let shown = name.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(tag(SharedString::from(format!("keep-{name}")), shown, th::VIOLET))
+                    .child(
+                        icon_button(SharedString::from(format!("del-preset-{name}")), "icons/x.svg", "Delete this preset")
+                            .on_click(cx.listener(move |this, _, _, cx| this.remove_preset(name.clone(), cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let save_preset = ghost_button("save-preset", "Save current as preset", "icons/plus.svg")
+            .tooltip(tip("Remembers the quality, size, bitrate and video settings below"))
+            .on_click(cx.listener(|this, _, _, cx| this.save_preset(cx)));
+        let presets_block = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().flex().flex_wrap().gap_2().children(preset_chips))
+            .child(div().flex().items_center().gap_2().child(save_preset).children(user_presets));
+
+        let metadata = seg_group(vec![
+            seg_button("md-on".into(), "Keep", s.keep_metadata)
+                .tooltip(tip("Copies the colour profile and EXIF (camera, date, orientation) into the converted image"))
+                .on_click(cx.listener(|this, _, _, cx| this.tweak(cx, |s| s.keep_metadata = true))),
+            seg_button("md-off".into(), "Drop", !s.keep_metadata)
+                .tooltip(tip("Writes a plain image with no metadata"))
+                .on_click(cx.listener(|this, _, _, cx| this.tweak(cx, |s| s.keep_metadata = false))),
+        ]);
+        let recycle = seg_group(vec![
+            seg_button("rc-on".into(), "Recycle Bin", s.recycle_replaced)
+                .tooltip(tip("The file being replaced goes to the Recycle Bin, so it can be restored"))
+                .on_click(cx.listener(|this, _, _, cx| this.tweak(cx, |s| s.recycle_replaced = true))),
+            seg_button("rc-off".into(), "Delete", !s.recycle_replaced)
+                .tooltip(tip("The file being replaced is deleted outright"))
+                .on_click(cx.listener(|this, _, _, cx| this.tweak(cx, |s| s.recycle_replaced = false))),
+        ]);
+
         let thumb = Self::scroll_thumb(&self.settings_scroll);
 
         div()
@@ -1065,9 +1210,12 @@ impl ConverterApp {
                             .child(heading("OUTPUT"))
                             .child(stacked("Save converted files", output))
                             .child(inline("If the name already exists", conflict))
+                            .child(inline("Replace by moving the old file to", recycle))
                             .child(heading("IMAGES"))
+                            .child(stacked("Presets", presets_block))
                             .child(stacked("Quality (JPEG, WebP, AVIF)", quality))
                             .child(stacked("Largest image size", max_size))
+                            .child(inline("Metadata", metadata))
                             .child(heading("AUDIO & VIDEO"))
                             .child(stacked("Audio bitrate (MP3, Ogg, Opus, AAC)", bitrate))
                             .child(inline("Video quality", video))
@@ -1118,6 +1266,8 @@ impl Render for ConverterApp {
         th::set_light(light);
         let size = window.viewport_size();
         self.track_window(f32::from(size.width), f32::from(size.height));
+        // Keep the native handle so a finished batch can flash the taskbar.
+        files::remember_window(window);
 
         if std::env::var_os("UBERCONV_DEBUG_ROWS").is_some() {
             let built = ROWS_BUILT.swap(0, std::sync::atomic::Ordering::Relaxed);
@@ -1143,6 +1293,10 @@ impl Render for ConverterApp {
             .on_action(cx.listener(|_, _: &NextField, window, _| window.focus_next()))
             .on_action(cx.listener(|_, _: &PrevField, window, _| window.focus_prev()))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
+            .on_action(cx.listener(|this, _: &RemovePicked, _, cx| this.remove_picked(cx)))
+            .on_action(cx.listener(|this, _: &TogglePickedOptions, _, cx| this.toggle_picked_options(cx)))
+            .on_action(cx.listener(|this, _: &CopyErrors, _, cx| this.copy_all_errors(cx)))
+            .on_action(cx.listener(|this, _: &CombinePdf, _, cx| this.combine_into_pdf(cx)))
             // soft violet glow at the top of the window
             .child(
                 div().absolute().top_0().left_0().right_0().h(px(260.)).bg(linear_gradient(

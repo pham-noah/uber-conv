@@ -45,6 +45,27 @@ pub fn pick_folder(start: Option<PathBuf>) -> Receiver<Option<PathBuf>> {
     })
 }
 
+/// Ask where to write one combined PDF.
+pub fn save_pdf(start: Option<PathBuf>, suggested: &str) -> Receiver<Option<PathBuf>> {
+    let suggested = suggested.to_string();
+    off_thread(move || {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save combined PDF")
+            .add_filter("PDF", &["pdf"])
+            .set_file_name(&suggested);
+        if let Some(dir) = usable(&start) {
+            dialog = dialog.set_directory(dir);
+        }
+        let picked = dialog.save_file()?;
+        // rfd doesn't always append the extension the user typed around.
+        if picked.extension().is_none() {
+            Some(picked.with_extension("pdf"))
+        } else {
+            Some(picked)
+        }
+    })
+}
+
 /// The folder a picked path should be remembered by: its parent, or the path itself.
 pub fn folder_of(path: &Path) -> Option<PathBuf> {
     if path.is_dir() {

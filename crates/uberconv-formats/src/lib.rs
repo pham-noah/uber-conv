@@ -14,6 +14,7 @@ pub mod docx;
 pub mod ffmpeg;
 pub mod heic;
 pub mod image_conv;
+pub mod meta;
 pub mod pdf;
 pub mod text;
 

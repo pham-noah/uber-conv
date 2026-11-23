@@ -39,6 +39,9 @@ fn main() {
             KeyBinding::new("secondary-z", Undo, Some("ConverterApp")),
             KeyBinding::new("tab", NextField, Some("ConverterApp")),
             KeyBinding::new("shift-tab", PrevField, Some("ConverterApp")),
+            KeyBinding::new("delete", RemovePicked, Some("ConverterApp")),
+            KeyBinding::new("space", TogglePickedOptions, Some("ConverterApp")),
+            KeyBinding::new("secondary-shift-c", CopyErrors, Some("ConverterApp")),
         ]);
 
         let settings = Settings::load();

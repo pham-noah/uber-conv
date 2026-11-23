@@ -57,7 +57,7 @@ mod tests {
 }
 
 /// User-facing knobs. Converters read what they care about and ignore the rest.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     /// JPEG / WebP / AVIF quality, 1-100 (100 = lossless WebP).
     pub image_quality: u8,
@@ -67,8 +67,13 @@ pub struct Options {
     pub audio_bitrate_kbps: u32,
     /// Constant rate factor for H.264 (lower = better); VP9 derives from it.
     pub video_crf: u8,
-    /// Which page of a PDF to render (1-based).
+    /// Which page of a PDF to render (1-based). Ignored when `pdf_all_pages`.
     pub pdf_page: u32,
+    /// Render every page of a PDF, writing `page.png`, `page-002.png`, …
+    pub pdf_all_pages: bool,
+    /// Carry the colour profile (and EXIF where the container allows) into the
+    /// converted image, so photos keep looking the way they look now.
+    pub keep_metadata: bool,
 }
 
 impl Default for Options {
@@ -79,6 +84,8 @@ impl Default for Options {
             audio_bitrate_kbps: 192,
             video_crf: 23,
             pdf_page: 1,
+            pdf_all_pages: false,
+            keep_metadata: true,
         }
     }
 }

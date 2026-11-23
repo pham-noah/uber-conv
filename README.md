@@ -47,23 +47,36 @@ the same everywhere.
 ## The app
 
 * Drop files **or folders** (folders are walked; hidden files and unsupported types
-  are skipped and reported). Files can also be passed on the command line /
-  "Open with".
+  are skipped and reported, and a folder's structure is mirrored in the output
+  rather than flattened). Files can also be passed on the command line /
+  "Open with". Past 5,000 files the app says so instead of quietly stopping.
 * **Set all to...** bar to convert a whole queue to one format at once.
 * Per-file format chips grouped by family, with tooltips showing the route
   (`PNG -> JPEG (lossy)`), plus `lossy` and `via JSON` tags that explain themselves.
+  **Clicking a second chip adds a second output** — one 12 MP PNG can become a
+  JPEG, a WebP and a PDF in the same run, each with its own progress
+  (`JPEG 40% · WebP done`).
+* **Presets**: `Web` (1600 px, q82), `Lossless` and `Email` are built in; the
+  current numbers can be saved as your own chip, and applied to everything in
+  the queue with one click.
 * Honest states: *Queued*, *Converting 42%*, *Cancelling...*, *Done* (with
   `3.3 MB -> 512 KB, -85%`), *Failed* (expandable details, Copy, Retry) and a
-  neutral *Cancelled*. Cancel one file or everything; retry any file.
+  neutral *Cancelled*. Cancel one file or everything; **Retry 3 failed** reruns
+  just the failures.
 * Overall progress in the footer, a result summary when a batch ends
-  ("12 files converted in 8.3 s, saved 24 MB"), and an optional desktop
-  notification for long batches (Linux `notify-send`, macOS `osascript`).
+  ("12 files converted in 8.3 s, saved 24 MB"), an **Open folder** button for
+  the result, and — for batches over 8 s — a desktop notification plus a
+  flashing taskbar button (Linux `notify-send`, macOS `osascript`).
+* **Combine N images into PDF**: one page per image, in queue order.
 * **Settings** (persisted as JSON in the platform config dir): theme, output
-  folder, overwrite vs. keep both, JPEG quality, largest image size, audio
-  bitrate, video quality, notifications. The window size is remembered.
+  folder, overwrite vs. keep both (a replaced file goes to the Recycle Bin),
+  JPEG quality, largest image size, audio bitrate, video quality, keep or drop
+  metadata, notifications. The window size is remembered.
 * Keyboard: `Ctrl/Cmd+O` open, `Ctrl/Cmd+Enter` convert, `Ctrl/Cmd+.` cancel all,
   `Ctrl/Cmd+K` clear finished, `Ctrl/Cmd+Z` undo, `Ctrl/Cmd+,` settings, `Esc` close settings,
-  `Tab`/`Shift+Tab` to move focus (focus rings on every control).
+  `Tab`/`Shift+Tab` to move focus (focus rings on every control), and on the
+  picked row: `Del` removes it, `Space` opens its options, `Ctrl/Cmd+Shift+C`
+  copies every error in the queue.
 * **Virtualised queue**: only the visible rows are built, so thousands of files
   stay smooth (measured: 3,006 queued files, at most 6 rows built per frame
   while scrolling; set `UBERCONV_DEBUG_ROWS=1` to see it).
@@ -103,12 +116,17 @@ stitched into one bar.
 Details worth knowing:
 
 * **Photos**: EXIF orientation is applied, so phone pictures aren't sideways.
-  Other metadata (EXIF, ICC profiles) is *not* copied to the output.
+  With **keep metadata** on (the default) the colour profile (ICC) and EXIF are
+  copied to the converted image; turn it off for the smallest file.
 * **SVG** is rasterised (1024 px on the long side unless you set a size).
 * **PDF -> image** renders one page per conversion (page 1, or the page you pick
-  in the file's options / `--page N`) at 150 dpi on white. **Image -> PDF**
-  makes a one-page PDF sized to the image; JPEGs are embedded untouched, PNG
-  transparency becomes a soft mask. Encrypted PDFs aren't supported.
+  in the file's options / `--page N`) at 150 dpi on white — or **every page** at
+  once with `--all-pages` / the "all pages" switch (`page.png`, `page-002.png`,
+  …). **Image -> PDF** makes a one-page PDF sized to the image; several images
+  become one multi-page PDF (`--combine`, "Combine into PDF" in the app). JPEGs
+  are embedded untouched, PNG transparency becomes a soft mask. Encrypted PDFs
+  aren't supported, and a renderer crash on a broken file is reported as that
+  file's error instead of taking the app down.
 * **Word** conversion keeps structure (headings, bold/italic/strike, code,
   links, nested lists, tables, quotes), not layout; images, comments and
   headers/footers are dropped. Word -> HTML/text and text -> Word go through
@@ -130,6 +148,25 @@ Details worth knowing:
   static libraries and makes the exe depend on `MSVCP140.dll`; the default Windows
   build (system codec) has neither cost.
 * Not supported: RAW photos, 7z/RAR.
+
+## Install on Windows
+
+`scripts/install-windows.ps1` is a per-user installer: no admin rights, no
+elevation. It copies `uberconv-app.exe` + `uberconv.exe` (and `ffmpeg.exe`
+when it sits beside them) into `%LOCALAPPDATA%\Programs\uberconv`, adds a
+Start-menu shortcut whose AppUserModelID is `NoahPham.uberconv` (so
+notifications carry the app's name and icon instead of PowerShell's), registers
+"Convert with uberconv…" on files and folders, adds an **Apps & features**
+entry, and puts the folder on `PATH` so `uberconv` works in any terminal.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+.\scripts\install-windows.ps1 -Source 'F:\App Projects\Uberconv\target\release' -NoPath
+```
+
+`scripts/uninstall-windows.ps1` reverses all of it; it is copied into the
+install folder so Add/Remove Programs keeps working after the checkout is gone.
+Both scripts are idempotent — re-running the installer is an upgrade.
 
 ## Build
 
@@ -154,14 +191,24 @@ Xcode + Metal toolchain on macOS). See the GPUI / Zed build docs.
 ```sh
 uberconv photo.png photo.webp
 uberconv *.png --to jpg -q 85 --max-size 1600
+uberconv *.png --to webp --out converted/      # everything into one folder
+uberconv ~/Photos --to jpg -r --out ~/Small    # a whole tree, mirrored in the output
 uberconv talk.mp4 --to mp3 --bitrate 256
 uberconv config.yaml config.toml
 uberconv report.pdf page.png --page 3   # render page 3
+uberconv report.pdf --to png --all-pages  # every page
+uberconv cover.png back.png --combine book.pdf
 uberconv photo.png photo.pdf
 uberconv notes.md notes.docx
 uberconv backup.zip backup.tar.gz
+uberconv ~/Music --to mp3 --dry-run --json   # what would it do, machine-readably?
 uberconv targets yaml            # what can YAML become, and via which route?
 ```
+
+`--json` prints one object per run (`{"converted":3,"failed":0,"results":[...]}`),
+`--quiet` prints only failures, `--dry-run` converts nothing, and the exit code
+is 1 when anything failed — so `for f in *; do uberconv "$f" --to ... || break; done`
+does the right thing.
 
 ## Performance
 
@@ -234,7 +281,7 @@ New formats are one line in the `formats!` table in `uberconv-core/src/format.rs
 
 ## Status
 
-* v0.1.0. All crates build and **46 tests pass** (engine, every converter, the
+* v0.1.0, with the 0.2.0 features in place. All crates build and **51 tests pass** (engine, every converter, the
   CLI, and the app's file/settings logic). Fixtures for EXIF, PDF, Word and archives were
   made by independent tools (PIL, python-docx, Python's zipfile/tarfile; see
   `crates/uberconv-formats/tests/fixtures/make_fixtures.py`), and outputs were

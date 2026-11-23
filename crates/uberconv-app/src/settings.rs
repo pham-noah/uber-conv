@@ -24,6 +24,58 @@ pub enum OutputMode {
     Folder(PathBuf),
 }
 
+/// A named bundle of the knobs people actually care about. Built-ins are code
+/// (see [`builtin_presets`]); ones the user saves live in `Settings::presets`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Preset {
+    pub name: String,
+    pub image_quality: u8,
+    pub image_max_dimension: Option<u32>,
+    pub audio_bitrate_kbps: u32,
+    pub video_crf: u8,
+}
+
+impl Default for Preset {
+    fn default() -> Self {
+        let o = Options::default();
+        Preset {
+            name: "Custom".into(),
+            image_quality: o.image_quality,
+            image_max_dimension: o.image_max_dimension,
+            audio_bitrate_kbps: o.audio_bitrate_kbps,
+            video_crf: o.video_crf,
+        }
+    }
+}
+
+/// The three starting points offered as chips: small files for the web, the
+/// best quality we can produce, and something small enough to email.
+pub fn builtin_presets() -> [Preset; 3] {
+    [
+        Preset { name: "Web".into(), image_quality: 82, image_max_dimension: Some(1600), audio_bitrate_kbps: 160, video_crf: 26 },
+        Preset { name: "Lossless".into(), image_quality: 100, image_max_dimension: None, audio_bitrate_kbps: 320, video_crf: 18 },
+        Preset { name: "Email".into(), image_quality: 72, image_max_dimension: Some(1200), audio_bitrate_kbps: 96, video_crf: 30 },
+    ]
+}
+
+impl Preset {
+    pub fn describe(&self) -> String {
+        let dim = match self.image_max_dimension {
+            Some(d) => format!("{d} px"),
+            None => "full size".into(),
+        };
+        format!("q{} · {dim}", self.image_quality)
+    }
+    /// Does the current settings match this preset's numbers?
+    pub fn matches(&self, s: &Settings) -> bool {
+        self.image_quality == s.image_quality
+            && self.image_max_dimension == s.image_max_dimension
+            && self.audio_bitrate_kbps == s.audio_bitrate_kbps
+            && self.video_crf == s.video_crf
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Settings {
@@ -37,6 +89,12 @@ pub struct Settings {
     pub video_crf: u8,
     /// Desktop notification when a long batch finishes.
     pub notify: bool,
+    /// Keep the colour profile and EXIF of converted images.
+    pub keep_metadata: bool,
+    /// Send the file being overwritten to the Recycle Bin instead of deleting it.
+    pub recycle_replaced: bool,
+    /// Presets the user saved from the current numbers.
+    pub presets: Vec<Preset>,
     /// Folder the last file picker was in ("remember last folder").
     pub last_dir: Option<PathBuf>,
     /// Output folder the last folder picker was in.
@@ -56,6 +114,9 @@ impl Default for Settings {
             audio_bitrate_kbps: o.audio_bitrate_kbps,
             video_crf: o.video_crf,
             notify: true,
+            keep_metadata: o.keep_metadata,
+            recycle_replaced: true,
+            presets: Vec::new(),
             last_dir: None,
             output_pick_dir: None,
             window: None,
@@ -70,6 +131,7 @@ impl Settings {
             image_max_dimension: self.image_max_dimension,
             audio_bitrate_kbps: self.audio_bitrate_kbps,
             video_crf: self.video_crf,
+            keep_metadata: self.keep_metadata,
             ..Options::default()
         }
     }

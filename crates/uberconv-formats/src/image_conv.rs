@@ -296,6 +296,10 @@ impl Converter for ImageConverter {
         ctx.cancel.check()?;
         ctx.report(0.5);
         save_image(img, job.to, job.output, ctx)?;
+        if ctx.options.keep_metadata {
+            // Colour profile and EXIF ride along; never fatal.
+            crate::meta::carry(job.from, job.to, job.input, job.output);
+        }
         ctx.report(1.0);
         Ok(())
     }

@@ -189,6 +189,55 @@ fn pdf_pages_can_be_chosen() {
 }
 
 #[test]
+fn every_pdf_page_can_be_exported_at_once() {
+    let r = default_registry();
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = staged(dir.path(), "three-pages.pdf");
+    let opts = Options { pdf_all_pages: true, ..Options::default() };
+    let first = dir.path().join("sheet.png");
+    r.convert(&pdf, &first, Format::Pdf, Format::Png, &Context::new(opts)).unwrap();
+
+    // Page 1 keeps the planned name, the rest are numbered so they sort.
+    let pages = [dir.path().join("sheet.png"), dir.path().join("sheet-002.png"), dir.path().join("sheet-003.png")];
+    let expected = [[220, 30, 30], [30, 200, 60], [30, 60, 220]];
+    for (path, want) in pages.iter().zip(expected) {
+        assert!(path.exists(), "{} missing", path.display());
+        assert!(near(dominant(path), want), "{}: {:?}", path.display(), dominant(path));
+    }
+    assert!(!dir.path().join("sheet-004.png").exists());
+}
+
+#[test]
+fn several_images_become_one_pdf() {
+    let r = default_registry();
+    let dir = tempfile::tempdir().unwrap();
+    let mut inputs = Vec::new();
+    for (i, color) in [[200u8, 20, 20], [20, 200, 20], [20, 20, 200]].iter().enumerate() {
+        let path = dir.path().join(format!("p{i}.png"));
+        image::RgbImage::from_pixel(120, 90, image::Rgb(*color)).save(&path).unwrap();
+        inputs.push(path);
+    }
+    let out = dir.path().join("album.pdf");
+    uberconv_formats::pdf::images_to_pdf(&inputs, &out, &Context::default()).unwrap();
+
+    // Read the pages back out through the normal PDF -> image path: three pages,
+    // each keeping its own image's colour.
+    let text = String::from_utf8_lossy(&fs::read(&out).unwrap()).to_string();
+    assert!(text.contains("/Count 3"), "page count missing");
+    for (i, want) in [[200, 20, 20], [20, 200, 20], [20, 20, 200]].iter().enumerate() {
+        let page = dir.path().join(format!("back{i}.png"));
+        let opts = Options { pdf_page: i as u32 + 1, ..Options::default() };
+        r.convert(&out, &page, Format::Pdf, Format::Png, &Context::new(opts)).unwrap();
+        assert!(near(dominant(&page), *want), "page {}: {:?}", i + 1, dominant(&page));
+    }
+
+    // A non-image cannot be smuggled into the document.
+    let txt = dir.path().join("note.txt");
+    fs::write(&txt, "hello").unwrap();
+    assert!(uberconv_formats::pdf::images_to_pdf(&[txt], &dir.path().join("no.pdf"), &Context::default()).is_err());
+}
+
+#[test]
 fn broken_pdfs_fail_cleanly() {
     let r = default_registry();
     let dir = tempfile::tempdir().unwrap();
