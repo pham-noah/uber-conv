@@ -1,5 +1,10 @@
 //! uberconv desktop UI, built on GPUI.
 
+// The GUI binary must not allocate a console window: launched from Explorer, a
+// console-subsystem exe flashes (or leaves) a terminal next to the app. Debug
+// builds keep the console so `println!` and panics stay visible in `cargo run`.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod actions;
 mod app;
 mod assets;
