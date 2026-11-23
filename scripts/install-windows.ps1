@@ -354,8 +354,12 @@ Write-Step "Registered  : $RegAumid"
 # --------------------------------------------------------------------------
 # 6. Per-user context-menu verbs ("Convert with uberconv...")
 #    NOTE: these only do something because uberconv-app.exe accepts file and
-#    folder paths as argv[1..] and queues them at startup. "%1" passes one
-#    item; Windows hands over the first selection on multi-select.
+#    folder paths as argv[1..] and queues them at startup.
+#    A shell verb can only substitute %1: "%*" is a cmd.exe construct Explorer
+#    does not expand, so one command line cannot carry a whole selection.
+#    MultiSelectModel='Player' is what keeps Explorer from silently dropping
+#    the other files - it offers the verb for any selection size and invokes it
+#    separately per item, so N files become N launches instead of one.
 # --------------------------------------------------------------------------
 $verbLabel = 'Convert with uberconv...'
 $verbCmd   = '"' + $GuiExe + '" "%1"'
@@ -367,6 +371,8 @@ $verbKeys = @(
 foreach ($verbKey in $verbKeys) {
     Set-RegValue -SubKey $verbKey          -Name ''     -Value $verbLabel
     Set-RegValue -SubKey $verbKey          -Name 'Icon' -Value ($GuiExe + ',0')
+    # Player: offered for any selection, invoked once per selected item.
+    Set-RegValue -SubKey $verbKey          -Name 'MultiSelectModel' -Value 'Player'
     Set-RegValue -SubKey "$verbKey\command" -Name ''    -Value $verbCmd
 }
 Write-Step "Context menu: 'Convert with uberconv...' for files and folders"

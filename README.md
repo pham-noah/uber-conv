@@ -66,7 +66,11 @@ the same everywhere.
 * Overall progress in the footer, a result summary when a batch ends
   ("12 files converted in 8.3 s, saved 24 MB"), an **Open folder** button for
   the result, and — for batches over 8 s — a desktop notification plus a
-  flashing taskbar button (Linux `notify-send`, macOS `osascript`).
+  flashing taskbar button (Linux `notify-send`, macOS `osascript`). On Windows
+  the toast is posted under the app's own AppUserModelID, so it is grouped and
+  credited to "uberconv" rather than to PowerShell; checked by reading back
+  `ToastNotificationManager.History`, since a banner can be filed silently
+  while a fullscreen app owns the screen.
 * **Combine N images into PDF**: one page per image, in queue order.
 * **Settings** (persisted as JSON in the platform config dir): theme, output
   folder, overwrite vs. keep both (a replaced file goes to the Recycle Bin),
@@ -167,6 +171,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps
 `scripts/uninstall-windows.ps1` reverses all of it; it is copied into the
 install folder so Add/Remove Programs keeps working after the checkout is gone.
 Both scripts are idempotent — re-running the installer is an upgrade.
+
+The context-menu verb takes `%1`, because Explorer does not expand `%*` in shell
+verbs — no single command line can carry a whole selection. `MultiSelectModel`
+is registered as `Player`, so converting three selected files starts one window
+per file rather than silently dropping two.
 
 ## Build
 
@@ -281,7 +290,7 @@ New formats are one line in the `formats!` table in `uberconv-core/src/format.rs
 
 ## Status
 
-* v0.1.0, with the 0.2.0 features in place. All crates build and **51 tests pass** (engine, every converter, the
+* v0.2.0. All crates build and **51 tests pass** (engine, every converter, the
   CLI, and the app's file/settings logic). Fixtures for EXIF, PDF, Word and archives were
   made by independent tools (PIL, python-docx, Python's zipfile/tarfile; see
   `crates/uberconv-formats/tests/fixtures/make_fixtures.py`), and outputs were
