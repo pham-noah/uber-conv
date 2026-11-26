@@ -93,3 +93,36 @@ fn config_dir() -> Option<PathBuf> {
         .map(|p| p.join("uberconv"))
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_round_trips_through_json() {
+        let text = r#"{"items":[{"path":"C:/a/one.png","targets":["jpg","pdf"],"save_as":"C:/out/x.jpg"}]}"#;
+        let s: Session = serde_json::from_str(text).unwrap();
+        assert_eq!(s.items.len(), 1);
+        assert_eq!(s.items[0].targets, vec!["jpg".to_string(), "pdf".to_string()]);
+        assert_eq!(s.items[0].save_as.as_deref(), Some(std::path::Path::new("C:/out/x.jpg")));
+        let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.items[0].targets, s.items[0].targets);
+    }
+
+    #[test]
+    fn older_sessions_load_with_what_they_had() {
+        // A file written before save_as existed, and one with no targets at all.
+        let s: Session = serde_json::from_str(r#"{"items":[{"path":"C:/a/b.png"}]}"#).unwrap();
+        assert!(s.items[0].targets.is_empty());
+        assert!(s.items[0].save_as.is_none());
+        // An empty object is a valid, empty queue.
+        assert!(Session::default().items.is_empty());
+    }
+
+    #[test]
+    fn extensions_are_what_the_planner_writes() {
+        assert_eq!(ext_of(Format::Jpeg), "jpg");
+        assert_eq!(ext_of(Format::Pdf), "pdf");
+    }
+}

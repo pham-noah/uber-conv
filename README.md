@@ -46,16 +46,28 @@ the same everywhere.
 
 ## The app
 
-* Drop files **or folders** (folders are walked; hidden files and unsupported types
+* Drop files **or folders** anywhere in the window (the whole surface takes a
+  drop, not a strip at the top; folders are walked; hidden files and unsupported types
   are skipped and reported, and a folder's structure is mirrored in the output
   rather than flattened). Files can also be passed on the command line /
   "Open with". Past 5,000 files the app says so instead of quietly stopping.
 * **Set all to...** bar to convert a whole queue to one format at once.
 * Per-file format chips grouped by family, with tooltips showing the route
-  (`PNG -> JPEG (lossy)`), plus `lossy` and `via JSON` tags that explain themselves.
+  (`PNG -> JPEG (lossy)`), plus a `~` on every target, a second output
+  (`JPEG 40% · WebP done`) and a `via JSON` tag that explains itself. A row shows
+  only the formats you picked — `7 more` opens the rest, so the queue stays a list
+  you read rather than one you scroll.
   **Clicking a second chip adds a second output** — one 12 MP PNG can become a
-  JPEG, a WebP and a PDF in the same run, each with its own progress
-  (`JPEG 40% · WebP done`).
+  JPEG, a WebP and a PDF in the same run, each with its own progress.
+* **Search** the queue by file name or folder (`/` to focus). It narrows what you
+  see, and what you see is what runs: *Set all to*, *Convert* and *Delete* act on
+  the filtered list, not the hidden one.
+* **Pick a range**: shift-click, or `Shift+↑ ↓`. *Set all to* then reads `Set 4
+  picked to`, and Delete takes the span in one undoable step.
+* **Replacing files takes a second press.** With overwrite on, a batch that would
+  clobber existing outputs stops and tells you how many, instead of just doing it.
+* **The queue survives closing the window** (staged in `session.json` beside the
+  settings; finished rows are left out — the converted file is the record).
 * **Presets**: `Web` (1600 px, q82), `Lossless` and `Email` are built in; the
   current numbers can be saved as your own chip, and applied to everything in
   the queue with one click.
@@ -76,11 +88,13 @@ the same everywhere.
   folder, overwrite vs. keep both (a replaced file goes to the Recycle Bin),
   JPEG quality, largest image size, audio bitrate, video quality, keep or drop
   metadata, notifications. The window size is remembered.
-* Keyboard: `Ctrl/Cmd+O` open, `Ctrl/Cmd+Enter` convert, `Ctrl/Cmd+.` cancel all,
-  `Ctrl/Cmd+K` clear finished, `Ctrl/Cmd+Z` undo, `Ctrl/Cmd+,` settings, `Esc` close settings,
-  `Tab`/`Shift+Tab` to move focus (focus rings on every control), and on the
-  picked row: `Del` removes it, `Space` opens its options, `Ctrl/Cmd+Shift+C`
-  copies every error in the queue.
+* Keyboard: `Ctrl/Cmd+O` open, `Enter` convert the picked row, `Ctrl/Cmd+Enter`
+  convert everything shown, `↑ ↓` walk the queue, `/` search, `F1` (or `?`) the
+  whole sheet, `Ctrl/Cmd+.` cancel all, `Ctrl/Cmd+K` clear finished, `Ctrl/Cmd+Z`
+  undo, `Ctrl/Cmd+,` settings, `Esc` close a panel, `Tab` to move focus (focus
+  rings on every control), and on the picked row: `Del` removes it, `Shift+↑ ↓`
+  grows the span, `Space` opens its options or toggles the format under the
+  `← →` cursor, `Ctrl/Cmd+Shift+C` copies every error in the queue.
 * **Virtualised queue**: only the visible rows are built, so thousands of files
   stay smooth (measured: 3,006 queued files, at most 6 rows built per frame
   while scrolling; set `UBERCONV_DEBUG_ROWS=1` to see it).
@@ -89,7 +103,9 @@ the same everywhere.
   for that file's target. A "custom" tag marks files that differ from Settings.
 * **Undo** removals and "Clear finished" (toast button or `Ctrl/Cmd+Z`),
   **drag to reorder** (grip on each card) and **sort** by name, size or type.
-* **ETA** in the footer ("5 of 6 done · 99% · ~1 s left").
+* **ETA** in the footer and on the running row ("Converting... 50% · ~3 s left"),
+  and only once there are three seconds of real measurements behind it — the number
+  never comes from a guess.
 * Thin custom scrollbars for the queue and the settings panel.
 Icons are small embedded SVGs in `crates/uberconv-app/assets/icons/`.
 
@@ -290,8 +306,8 @@ New formats are one line in the `formats!` table in `uberconv-core/src/format.rs
 
 ## Status
 
-* v0.2.0. All crates build and **51 tests pass** (engine, every converter, the
-  CLI, and the app's file/settings logic). Fixtures for EXIF, PDF, Word and archives were
+* v0.3.0. All crates build and **57 tests pass** (engine, every converter, the
+  CLI, and the app's queue, session, search, file and settings logic). Fixtures for EXIF, PDF, Word and archives were
   made by independent tools (PIL, python-docx, Python's zipfile/tarfile; see
   `crates/uberconv-formats/tests/fixtures/make_fixtures.py`), and outputs were
   also checked with poppler, pypdf, python-docx, `zipfile`/`tarfile` and

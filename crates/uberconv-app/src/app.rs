@@ -181,6 +181,16 @@ pub enum Filter {
     Failed,
 }
 
+/// Does a row match the search text? Case-insensitive, over the file name and
+/// the folder it lives in — typing `scratch` finds everything on that drive.
+pub fn query_matches(query: &str, name: &str, path: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let needle = query.to_lowercase();
+    name.to_lowercase().contains(&needle) || path.to_lowercase().contains(&needle)
+}
+
 impl Filter {
     pub fn matches(self, item: &Item) -> bool {
         match self {
@@ -350,12 +360,7 @@ impl ConverterApp {
     }
 
     fn matches_query(&self, item: &Item) -> bool {
-        if self.query.is_empty() {
-            return true;
-        }
-        let needle = self.query.to_lowercase();
-        item.name().to_lowercase().contains(&needle)
-            || item.path.to_string_lossy().to_lowercase().contains(&needle)
+        query_matches(&self.query, &item.name(), &item.path.to_string_lossy())
     }
 
     fn rebuild_visible(&mut self) {
@@ -1697,5 +1702,23 @@ pub fn format_duration(d: Duration) -> String {
         format!("{secs:.1} s")
     } else {
         format!("{}m {:02}s", (secs / 60.0) as u32, (secs % 60.0) as u32)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_search_matches_everything() {
+        assert!(query_matches("", "a.png", "/tmp/a.png"));
+    }
+
+    #[test]
+    fn search_ignores_case_and_finds_the_folder() {
+        assert!(query_matches("PHOTO", "photo-1.png", "/tmp/photo-1.png"));
+        assert!(query_matches("scratch", "a.png", "C:/work/scratch/a.png"));
+        assert!(!query_matches("photo", "a.png", "C:/work/out/a.png"));
     }
 }

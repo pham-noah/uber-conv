@@ -6264,7 +6264,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "uberconv-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -6283,7 +6283,7 @@ dependencies = [
 
 [[package]]
 name = "uberconv-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "uberconv-core",
  "uberconv-formats",
@@ -6291,7 +6291,7 @@ dependencies = [
 
 [[package]]
 name = "uberconv-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tempfile",
  "thiserror 1.0.69",
@@ -6299,7 +6299,7 @@ dependencies = [
 
 [[package]]
 name = "uberconv-formats"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "csv",
  "flate2",
