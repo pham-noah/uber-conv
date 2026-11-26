@@ -6269,6 +6269,7 @@ dependencies = [
  "anyhow",
  "async-channel 2.5.0",
  "gpui",
+ "image 0.24.9",
  "raw-window-handle",
  "rfd",
  "serde",

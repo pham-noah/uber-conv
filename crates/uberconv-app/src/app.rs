@@ -8,14 +8,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{px, ClipboardItem, Context, FocusHandle, ListAlignment, ListState, ScrollHandle};
+use gpui::{px, ClipboardItem, Context, FocusHandle, ListAlignment, ListState, ScrollHandle, SharedString, Window};
 use uberconv_core::{BatchEvent, BatchItem, CancelToken, Context as CoreContext, Error, Family, Format, Options, Registry};
 
 use crate::{
-    dialogs, files,
-    settings::{OutputMode, Settings},
+    dialogs, files, session,
+    settings::{OutputMode, Settings, ThemeChoice},
 };
 
+#[derive(Clone)]
 pub enum State {
     Ready,
     /// In the batch, waiting for a free worker.
@@ -29,6 +30,7 @@ pub enum State {
 /// One output of one file. A file can be converted to several formats at once,
 /// so each (file, format) pair carries its own progress and result; the item's
 /// own `state` is what the row shows.
+#[derive(Clone)]
 pub struct Part {
     pub target: Format,
     pub state: State,
@@ -54,6 +56,13 @@ pub struct Item {
     /// Per-file options. `None` means "use the settings".
     pub opts: Option<Options>,
     pub options_open: bool,
+    /// Show the full format list. Collapsed rows show only the chosen
+    /// targets, which is what keeps a 30-file queue readable.
+    pub chips_open: bool,
+    /// "Save as…": an exact output path for this file, instead of the plan.
+    pub out_override: Option<PathBuf>,
+    /// Pixel size read from the file header, for the size estimate.
+    pub dims: Option<(u32, u32)>,
 }
 
 impl Item {
@@ -163,6 +172,40 @@ impl Relevant {
     }
 }
 
+/// Narrow the queue without hiding what is running: the list, "set all to"
+/// and the footer count all follow it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Filter {
+    All,
+    Family(Family),
+    Failed,
+}
+
+impl Filter {
+    pub fn matches(self, item: &Item) -> bool {
+        match self {
+            Filter::All => true,
+            Filter::Family(f) => item.from.is_some_and(|x| x.family() == f),
+            Filter::Failed => matches!(item.state, State::Failed(_)),
+        }
+    }
+}
+
+/// One reversible step. Removals come back at their old index; a bulk
+/// "set all to" restores every pick it overwrote.
+pub enum Undo {
+    Removed(Vec<(usize, Item)>),
+    Picks(Vec<PickSnapshot>),
+}
+
+pub struct PickSnapshot {
+    pub id: u64,
+    pub selected: Vec<Format>,
+    pub parts: Vec<Part>,
+    pub state: State,
+    pub opts: Option<Options>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     Name,
@@ -200,14 +243,28 @@ pub struct ConverterApp {
     pub ffmpeg: bool,
     pub settings: Settings,
     pub settings_open: bool,
+    /// Last title handed to the window, so it is only set when it changes.
+    pub title: SharedString,
     settings_closed_at: Option<Instant>,
     pub focus: FocusHandle,
     pub settings_scroll: ScrollHandle,
     pub notice: Option<Notice>,
     notice_seq: u64,
-    /// Removed items, newest group last, for Undo.
-    removed: Vec<Vec<(usize, Item)>>,
+    /// Reversible steps, newest last.
+    undo: Vec<Undo>,
     pub sort: Option<(SortKey, bool)>,
+    /// Which slice of the queue is shown, and the item indices it maps to.
+    pub filter: Filter,
+    pub visible: Vec<usize>,
+    pub help_open: bool,
+    /// Free-text filter over file name and folder.
+    pub query: String,
+    /// Shift-picked range: the rows "set all to" and Delete act on together.
+    pub multi: Vec<u64>,
+    /// A batch that would overwrite N existing files, waiting for a second
+    /// click. Replacing a file is the one thing here that cannot be undone.
+    pub confirm: Option<usize>,
+    pub search_focus: FocusHandle,
     /// Folder a queued file was dropped in, so output can mirror the tree.
     roots: HashMap<PathBuf, PathBuf>,
     /// Row last clicked, for the keyboard shortcuts (Del, Ctrl+Shift+C, Space).
@@ -237,13 +294,21 @@ impl ConverterApp {
             ffmpeg: uberconv_formats::ffmpeg_available(),
             settings,
             settings_open: false,
+            title: "Uberconv".into(),
             settings_closed_at: None,
             focus: cx.focus_handle(),
             settings_scroll: ScrollHandle::new(),
             notice: None,
             notice_seq: 0,
-            removed: Vec::new(),
+            undo: Vec::new(),
             sort: None,
+            filter: Filter::All,
+            visible: Vec::new(),
+            help_open: false,
+            query: String::new(),
+            multi: Vec::new(),
+            confirm: None,
+            search_focus: cx.focus_handle(),
             roots: HashMap::new(),
             picked: None,
             last_size: None,
@@ -263,11 +328,94 @@ impl ConverterApp {
         .detach();
     }
 
-    /// Tell the list that the row at `ix` changed height (details opened, ...).
-    fn remeasure(&self, ix: usize) {
-        if ix < self.items.len() {
-            self.list.splice(ix..ix + 1, 1);
+    /// Row index of an item in the filtered view, if it is shown at all.
+    fn row_of(&self, item_ix: usize) -> Option<usize> {
+        self.visible.iter().position(|&i| i == item_ix)
+    }
+
+    /// Tell the list that an item changed height (details opened, ...).
+    fn remeasure(&self, item_ix: usize) {
+        if let Some(row) = self.row_of(item_ix) {
+            self.list.splice(row..row + 1, 1);
         }
+    }
+
+    /// Is this row on screen right now (type filter and search text)?
+    pub fn shown(&self, item: &Item) -> bool {
+        self.filter.matches(item) && self.matches_query(item)
+    }
+
+    fn matches_query(&self, item: &Item) -> bool {
+        if self.query.is_empty() {
+            return true;
+        }
+        let needle = self.query.to_lowercase();
+        item.name().to_lowercase().contains(&needle)
+            || item.path.to_string_lossy().to_lowercase().contains(&needle)
+    }
+
+    fn rebuild_visible(&mut self) {
+        self.visible = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| self.shown(i))
+            .map(|(ix, _)| ix)
+            .collect();
+        self.list.reset(self.visible.len());
+    }
+
+    /// Clear the search from a button, without going through a keystroke.
+    pub fn rebuild_visible_public(&mut self) {
+        self.rebuild_visible();
+    }
+
+    /// Type into the search field. A plain text field, not a text editor:
+    /// arrows still move the queue, so only what a search needs is handled.
+    pub fn search_key(&mut self, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        match ks.key.as_str() {
+            "backspace" => {
+                self.query.pop();
+            }
+            "escape" => self.query.clear(),
+            "enter" => {
+                if let Some(&ix) = self.visible.first() {
+                    self.picked = Some(self.items[ix].id);
+                }
+            }
+            _ if !(ks.modifiers.control || ks.modifiers.alt || ks.modifiers.platform) => {
+                if let Some(ch) = &ks.key_char {
+                    if !ch.chars().any(char::is_control) {
+                        self.query.push_str(ch);
+                    }
+                }
+            }
+            _ => {}
+        }
+        // The key that opened the field must not also land in it.
+        if self.query == "/" || self.query == "secondary-f" {
+            self.query.clear();
+        }
+        self.rebuild_visible();
+        cx.notify();
+    }
+
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.search_focus);
+        cx.notify();
+    }
+
+    /// The queue changed shape (or an item did): re-derive the view.
+    fn requeue(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_visible();
+        self.refresh_soon(cx);
+        cx.notify();
+    }
+
+    pub fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
+        self.filter = filter;
+        self.requeue(cx);
     }
 
     fn index_of(&self, id: u64) -> Option<usize> {
@@ -360,6 +508,49 @@ impl ConverterApp {
 
     // ───────────── queue management ─────────────
 
+    /// Write the staged part of the queue to disk. Finished rows are left out:
+    /// the converted file itself is the record.
+    pub fn save_session(&self) {
+        let items = self
+            .items
+            .iter()
+            .filter(|i| i.can_start() || i.in_flight())
+            .map(|i| session::Entry {
+                path: i.path.clone(),
+                targets: i.selected.iter().map(|f| session::ext_of(*f)).collect(),
+                save_as: i.out_override.clone(),
+            })
+            .collect();
+        session::Session { items }.save();
+    }
+
+    /// Bring back last session's queue, picks and all.
+    pub fn restore_session(&mut self, cx: &mut Context<Self>) {
+        let session = session::Session::load();
+        if session.items.is_empty() {
+            return;
+        }
+        let entries = session.items;
+        self.add_paths(entries.iter().map(|e| e.path.clone()).collect(), cx);
+        for entry in &entries {
+            let Some(ix) = self.items.iter().position(|i| i.path == entry.path) else { continue };
+            let item = &mut self.items[ix];
+            let picked: Vec<Format> = entry
+                .targets
+                .iter()
+                .filter_map(|e| session::format_of(e))
+                .filter(|f| item.targets.contains(f))
+                .collect();
+            if !picked.is_empty() {
+                item.selected = picked;
+            }
+            item.out_override = entry.save_as.clone();
+        }
+        let n = self.items.len();
+        self.rebuild_visible();
+        self.flash(format!("Picked up where you left off — {n} file{} waiting", if n == 1 { "" } else { "s" }), false, cx);
+    }
+
     pub fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let remembered = paths.first().and_then(|p| dialogs::folder_of(p));
         let got = files::collect(paths);
@@ -368,6 +559,7 @@ impl ConverterApp {
         let before = self.items.len();
         let mut dupes = 0usize;
         let mut seen = known;
+        let mut probe: Vec<(u64, PathBuf)> = Vec::new();
         let truncated = got.truncated;
         let from_folders = got.from_folders;
 
@@ -402,13 +594,25 @@ impl ConverterApp {
                 expanded: false,
                 opts: None,
                 options_open: false,
+                chips_open: false,
+                out_override: None,
+                dims: None,
             });
+            if from.is_some_and(|f| f.family() == Family::Image) {
+                probe.push((self.next_id, self.items.last().map(|i| i.path.clone()).unwrap_or_default()));
+            }
             self.next_id += 1;
         }
         let added = self.items.len() - before;
         if added > 0 {
-            self.list.splice(before..before, added);
             self.summary = None;
+            if self.picked.is_none() {
+                self.picked = self.items.first().map(|i| i.id);
+            }
+            self.rebuild_visible();
+        }
+        if !probe.is_empty() {
+            self.probe_dims(probe, cx);
         }
         let mut msg = format!("Added {added} file{}", if added == 1 { "" } else { "s" });
         if got.skipped > 0 {
@@ -428,10 +632,39 @@ impl ConverterApp {
             if self.settings.last_dir.as_ref() != Some(&dir) {
                 self.settings.last_dir = Some(dir);
                 self.settings.save();
+                self.save_session();
             }
         }
         self.refresh_soon(cx);
+        self.save_session();
         cx.notify();
+    }
+
+    /// Read the pixel size of freshly added images off the UI thread, so rows
+    /// can show "≈ 340 KB" before anything is converted. One thread walks the
+    /// batch: a 3,000-file queue must not open 3,000 threads.
+    fn probe_dims(&mut self, requests: Vec<(u64, PathBuf)>, cx: &mut Context<Self>) {
+        let (tx, rx) = async_channel::unbounded::<(u64, (u32, u32))>();
+        thread::spawn(move || {
+            for (id, path) in requests {
+                if let Some(dims) = files::image_dims(&path) {
+                    if tx.send_blocking((id, dims)).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            while let Ok((id, dims)) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(item) = this.items.iter_mut().find(|i| i.id == id) {
+                        item.dims = Some(dims);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
     }
 
     pub fn open_dialog(&mut self, cx: &mut Context<Self>) {
@@ -461,30 +694,59 @@ impl ConverterApp {
                 item.selected.remove(at);
             } else {
                 item.selected.push(fmt);
+                // Only this output re-runs: the results of the others are
+                // still good, and "Saved as …" should not vanish because a
+                // second format was added.
+                item.parts.retain(|p| p.target != fmt);
+                if item.parts.is_empty() {
+                    item.state = State::Ready;
+                }
             }
-            item.state = State::Ready;
-            // a rerun has to forget the previous results
-            item.parts.clear();
         }
         self.remeasure(ix);
         cx.notify();
     }
 
     /// Apply `fmt` to every file that can be converted to it (one output each).
+    /// Undo puts back every pick this replaced.
     pub fn set_all(&mut self, fmt: Format, cx: &mut Context<Self>) {
-        let mut changed = Vec::new();
-        for (ix, item) in self.items.iter_mut().enumerate().filter(|(_, i)| !i.in_flight()) {
-            if item.targets.contains(&fmt) {
+        let mut snapshots = Vec::new();
+        let mut changed = 0usize;
+        let filter = self.filter;
+        let query = self.query.to_lowercase();
+        let span = self.bulk_ids();
+        for item in self.items.iter_mut().filter(|i| {
+            !span.as_ref().is_some_and(|s| !s.contains(&i.id))
+                && !i.in_flight()
+                && filter.matches(i)
+                && (query.is_empty()
+                    || i.name().to_lowercase().contains(&query)
+                    || i.path.to_string_lossy().to_lowercase().contains(&query))
+        }) {
+            if item.targets.contains(&fmt) && item.selected != vec![fmt] {
+                snapshots.push(PickSnapshot {
+                    id: item.id,
+                    selected: item.selected.clone(),
+                    parts: item.parts.clone(),
+                    state: item.state.clone(),
+                    opts: item.opts.clone(),
+                });
                 item.selected = vec![fmt];
                 item.parts.clear();
                 item.state = State::Ready;
-                changed.push(ix);
+                changed += 1;
             }
         }
-        for ix in changed {
-            self.remeasure(ix);
+        if changed == 0 {
+            return;
         }
-        cx.notify();
+        self.push_undo(Undo::Picks(snapshots));
+        self.flash(
+            format!("Set {changed} file{} to {}", if changed == 1 { "" } else { "s" }, fmt.name()),
+            true,
+            cx,
+        );
+        self.requeue(cx);
     }
 
     // ───────────── presets ─────────────
@@ -540,17 +802,21 @@ impl ConverterApp {
             return;
         }
         let item = self.items.remove(ix);
-        self.list.splice(ix..ix + 1, 0);
         let name = item.name();
-        self.push_removed(vec![(ix, item)]);
+        if self.picked == Some(id) {
+            // Keep the keyboard on the queue: the next row, or the one above.
+            self.picked = self.items.get(ix).or_else(|| self.items.last()).map(|i| i.id);
+        }
+        self.push_undo(Undo::Removed(vec![(ix, item)]));
+        self.save_session();
         self.flash(format!("Removed {name}"), true, cx);
-        self.refresh_soon(cx);
+        self.requeue(cx);
     }
 
-    fn push_removed(&mut self, group: Vec<(usize, Item)>) {
-        self.removed.push(group);
-        if self.removed.len() > 20 {
-            self.removed.remove(0);
+    fn push_undo(&mut self, step: Undo) {
+        self.undo.push(step);
+        if self.undo.len() > 20 {
+            self.undo.remove(0);
         }
     }
 
@@ -565,28 +831,45 @@ impl ConverterApp {
             }
         }
         self.items = kept;
-        self.list.reset(self.items.len());
         self.summary = None;
+        self.save_session();
         let n = group.len();
         if n > 0 {
-            self.push_removed(group);
+            self.picked = self.items.first().map(|i| i.id);
+            self.push_undo(Undo::Removed(group));
             self.flash(format!("Cleared {n} file{}", if n == 1 { "" } else { "s" }), true, cx);
         }
-        self.refresh_soon(cx);
-        cx.notify();
+        self.requeue(cx);
     }
 
     pub fn undo(&mut self, cx: &mut Context<Self>) {
-        let Some(group) = self.removed.pop() else { return };
-        let n = group.len();
-        // Reinserting in ascending order rebuilds the original positions.
-        for (ix, item) in group {
-            let at = ix.min(self.items.len());
-            self.items.insert(at, item);
+        let Some(step) = self.undo.pop() else { return };
+        match step {
+            Undo::Removed(group) => {
+                let n = group.len();
+                // Reinserting in ascending order rebuilds the original positions.
+                for (ix, item) in group {
+                    let at = ix.min(self.items.len());
+                    self.items.insert(at, item);
+                }
+                self.flash(format!("Restored {n} file{}", if n == 1 { "" } else { "s" }), false, cx);
+            }
+            Undo::Picks(snapshots) => {
+                let n = snapshots.len();
+                for s in snapshots {
+                    if let Some(item) = self.items.iter_mut().find(|i| i.id == s.id) {
+                        if !item.in_flight() {
+                            item.selected = s.selected;
+                            item.parts = s.parts;
+                            item.state = s.state;
+                            item.opts = s.opts;
+                        }
+                    }
+                }
+                self.flash(format!("Restored the picks of {n} file{}", if n == 1 { "" } else { "s" }), false, cx);
+            }
         }
-        self.list.reset(self.items.len());
-        self.flash(format!("Restored {n} file{}", if n == 1 { "" } else { "s" }), false, cx);
-        self.refresh_soon(cx);
+        self.requeue(cx);
     }
 
     /// Drag-and-drop reordering: put `dragged` where `target` is.
@@ -598,9 +881,7 @@ impl ConverterApp {
         let item = self.items.remove(from);
         self.items.insert(to, item);
         self.sort = None;
-        let (lo, hi) = (from.min(to), from.max(to));
-        self.list.splice(lo..hi + 1, hi + 1 - lo);
-        cx.notify();
+        self.requeue(cx);
     }
 
     /// Sort the queue; choosing the same key again flips the direction.
@@ -616,8 +897,7 @@ impl ConverterApp {
             if descending { ord.reverse() } else { ord }
         });
         self.sort = Some((key, descending));
-        self.list.reset(self.items.len());
-        cx.notify();
+        self.requeue(cx);
     }
 
     pub fn has_finished(&self) -> bool {
@@ -683,10 +963,96 @@ impl ConverterApp {
         }
     }
 
+    /// "Save as…" — one file, one exact output path, ignoring the folder plan.
+    pub fn save_as(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(item) = self.items.iter().find(|i| i.id == id) else { return };
+        let Some(to) = item.primary() else { return };
+        if item.selected.len() > 1 || item.in_flight() {
+            return;
+        }
+        let suggested = format!("{}.{}", Format::stem_of(&item.path), to.ext());
+        let start = item.out_override.as_ref().and_then(|p| p.parent().map(PathBuf::from)).or_else(|| {
+            match &self.settings.output {
+                OutputMode::Folder(dir) => Some(dir.clone()),
+                OutputMode::NextToSource => item.path.parent().map(PathBuf::from),
+            }
+        });
+        let rx = dialogs::save_file(start, &suggested, to.ext());
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(path)) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(ix) = this.index_of(id) {
+                        this.items[ix].out_override = Some(path);
+                        this.items[ix].state = State::Ready;
+                        this.remeasure(ix);
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Forget a per-file "save as" path.
+    pub fn clear_out_override(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(ix) = self.index_of(id) {
+            self.items[ix].out_override = None;
+            self.remeasure(ix);
+            cx.notify();
+        }
+    }
+
+    /// Enter on the picked row: convert just that file.
+    pub fn convert_picked(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.picked {
+            if self.items.iter().any(|i| i.id == id && i.can_start()) {
+                self.start(Some(id), cx);
+            }
+        }
+    }
+
+    /// Up/Down on the queue: move the keyboard cursor a row, and scroll to it.
+    pub fn step_picked(&mut self, delta: isize, shift: bool, cx: &mut Context<Self>) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let row = self
+            .picked
+            .and_then(|id| self.items.iter().position(|i| i.id == id))
+            .and_then(|ix| self.row_of(ix))
+            .unwrap_or(0);
+        let next = (row as isize + delta).clamp(0, self.visible.len() as isize - 1) as usize;
+        let id = self.items[self.visible[next]].id;
+        self.pick_with(id, shift, cx);
+        self.list.scroll_to_reveal_item(next);
+        cx.notify();
+    }
+
+    /// Open or close a row's full format list.
+    pub fn toggle_chips(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(ix) = self.index_of(id) {
+            self.items[ix].chips_open = !self.items[ix].chips_open;
+            self.remeasure(ix);
+            cx.notify();
+        }
+    }
+
+    pub fn set_theme(&mut self, theme: ThemeChoice, cx: &mut Context<Self>) {
+        self.tweak(cx, |s| s.theme = theme);
+    }
+
+    pub fn toggle_help(&mut self, cx: &mut Context<Self>) {
+        self.help_open = !self.help_open;
+        cx.notify();
+    }
+
     // ───────────── progress ─────────────
 
     pub fn convertible(&self) -> usize {
-        self.items.iter().filter(|i| i.can_start()).count()
+        self.items
+            .iter()
+            .filter(|i| i.can_start() && self.shown(i))
+            .count()
     }
 
     /// (files finished, files in the batch, overall fraction 0..1)
@@ -705,6 +1071,30 @@ impl ConverterApp {
         }
         let fraction = if total == 0 { 0.0 } else { sum / total as f32 };
         (finished, total, fraction)
+    }
+
+    /// How many outputs of this batch already exist on disk.
+    fn replacing_count(&self, visible: &Option<Vec<u64>>) -> usize {
+        let mut claimed = std::collections::HashSet::new();
+        let mut n = 0;
+        for item in &self.items {
+            if visible.as_ref().is_some_and(|v| !v.contains(&item.id)) || !item.can_start() {
+                continue;
+            }
+            for t in &item.selected {
+                if let Some(p) = &item.out_override {
+                    if item.selected.len() == 1 && p.is_file() {
+                        n += 1;
+                    }
+                    continue;
+                }
+                let out = files::output_path(&item.path, *t, &self.settings.output, true, &mut claimed, None);
+                if out.is_file() {
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
     /// Rough time left for the running batch, once there's enough data.
@@ -763,12 +1153,40 @@ impl ConverterApp {
             return;
         }
         let batch_cancel = CancelToken::new();
-        /// (item id, input, from, to, cancel token, per-file options)
-        type Job = (u64, PathBuf, Format, Format, CancelToken, Option<Options>);
+        /// (item id, input, from, to, cancel token, per-file options, "save as" path)
+        type Job = (u64, PathBuf, Format, Format, CancelToken, Option<Options>, Option<PathBuf>);
         let mut jobs: Vec<Job> = Vec::new();
         let mut collapsed = Vec::new();
+        // With a filter on, "convert all" means the files on screen: what you
+        // see is what runs.
+        let visible: Option<Vec<u64>> = (!self.visible.is_empty() && self.filter != Filter::All)
+            .then(|| self.visible.iter().map(|&ix| self.items[ix].id).collect());
+        // A shift-picked span narrows "convert all" further than the filter does.
+        let span = self.bulk_ids();
+        // Replacing files cannot be undone, so it takes a second press.
+        if only.is_none() && span.is_none() && self.settings.overwrite {
+            let replacing = self.replacing_count(&visible);
+            if replacing > 0 && self.confirm != Some(replacing) {
+                self.confirm = Some(replacing);
+                self.flash(
+                    format!(
+                        "{replacing} file{} already exist — press Convert again to replace {}",
+                        if replacing == 1 { "" } else { "s" },
+                        if replacing == 1 { "it" } else { "them" }
+                    ),
+                    false,
+                    cx,
+                );
+                return;
+            }
+        }
+        self.confirm = None;
         for (ix, item) in self.items.iter_mut().enumerate() {
-            if only.is_some_and(|id| id != item.id) || !item.can_start() {
+            if only.is_some_and(|id| id != item.id)
+                || visible.as_ref().is_some_and(|v| !v.contains(&item.id))
+                || span.as_ref().is_some_and(|s| !s.contains(&item.id))
+                || !item.can_start()
+            {
                 continue;
             }
             let Some(from) = item.from else { continue };
@@ -791,9 +1209,11 @@ impl ConverterApp {
                 collapsed.push(ix);
             }
             item.parts.retain(|p| !targets.contains(&p.target));
+            // "Save as…" names one file, so it only applies to a single output.
+            let forced = item.out_override.clone().filter(|_| targets.len() == 1);
             for t in &targets {
                 item.parts.push(Part { target: *t, state: State::Queued });
-                jobs.push((item.id, item.path.clone(), from, *t, token.clone(), item.opts.clone()));
+                jobs.push((item.id, item.path.clone(), from, *t, token.clone(), item.opts.clone(), forced.clone()));
             }
             item.recompute();
         }
@@ -842,7 +1262,7 @@ impl ConverterApp {
             return;
         }
         let batch_cancel = CancelToken::new();
-        type Job = (u64, PathBuf, Format, Format, CancelToken, Option<Options>);
+        type Job = (u64, PathBuf, Format, Format, CancelToken, Option<Options>, Option<PathBuf>);
         let mut jobs: Vec<Job> = Vec::new();
         for item in self.items.iter_mut().filter(|i| wanted.contains(&i.id) && i.can_start()) {
             let Some(from) = item.from else { continue };
@@ -859,9 +1279,10 @@ impl ConverterApp {
             item.token = Some(token.clone());
             item.cancelling = false;
             item.parts.retain(|p| !targets.contains(&p.target));
+            let forced = item.out_override.clone().filter(|_| targets.len() == 1);
             for t in &targets {
                 item.parts.push(Part { target: *t, state: State::Queued });
-                jobs.push((item.id, item.path.clone(), from, *t, token.clone(), item.opts.clone()));
+                jobs.push((item.id, item.path.clone(), from, *t, token.clone(), item.opts.clone(), forced.clone()));
             }
             item.recompute();
             item.expanded = false;
@@ -886,6 +1307,34 @@ impl ConverterApp {
             cx,
         );
         cx.notify();
+    }
+
+    /// Window title doubles as taskbar progress: minimised during a long batch
+    /// it is the only thing on screen.
+    pub fn window_title(&self) -> String {
+        if self.busy {
+            let mut done = 0usize;
+            let mut total = 0usize;
+            for item in self.items.iter().filter(|i| self.batch_ids.contains(&i.id)) {
+                for part in item.parts.iter().filter(|p| item.selected.contains(&p.target)) {
+                    total += 1;
+                    if matches!(part.state, State::Done { .. } | State::Failed(_) | State::Cancelled) {
+                        done += 1;
+                    }
+                }
+            }
+            return if total > 0 {
+                format!("{done} of {total} · {}%", done * 100 / total)
+            } else {
+                "Working…".to_string()
+            };
+        }
+        let n = self.items.iter().filter(|i| i.can_start()).count();
+        match n {
+            0 => "Uberconv".to_string(),
+            1 => "1 file · Uberconv".to_string(),
+            n => format!("{n} files · Uberconv"),
+        }
     }
 
     fn apply(&mut self, ev: Event) {
@@ -978,15 +1427,73 @@ impl ConverterApp {
     // ───────────── row selection and bulk actions ─────────────
 
     pub fn pick(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.settle(id, false, cx);
+    }
+
+    pub fn pick_with(&mut self, id: u64, shift: bool, cx: &mut Context<Self>) {
+        self.settle(id, shift, cx);
+    }
+
+    /// Click a row. Shift turns the last click into an anchor and selects the
+    /// span between it and this row; a plain click drops the span.
+    fn settle(&mut self, id: u64, shift: bool, cx: &mut Context<Self>) {
+        let span = if shift {
+            let Some(anchor) = self.picked else { self.picked = Some(id); self.multi.clear(); cx.notify(); return };
+            let Some(a) = self.items.iter().position(|i| i.id == anchor).and_then(|ix| self.row_of(ix)) else { self.picked = Some(id); cx.notify(); return };
+            let Some(b) = self.items.iter().position(|i| i.id == id).and_then(|ix| self.row_of(ix)) else { self.picked = Some(id); cx.notify(); return };
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            self.visible[lo..=hi].iter().map(|&ix| self.items[ix].id).collect()
+        } else {
+            Vec::new()
+        };
+        self.multi = span;
         self.picked = Some(id);
         cx.notify();
     }
 
+    /// Is this row part of the picked span?
+    pub fn in_span(&self, id: u64) -> bool {
+        !self.multi.is_empty() && self.multi.contains(&id)
+    }
+
+    /// The rows a bulk action should touch: the span if there is one,
+    /// otherwise everything on screen.
+    pub fn bulk_ids(&self) -> Option<Vec<u64>> {
+        (!self.multi.is_empty()).then(|| self.multi.clone())
+    }
+
     /// Delete the row the keyboard is on.
     pub fn remove_picked(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.picked {
-            self.remove(id, cx);
+        let ids: Vec<u64> = match self.bulk_ids() {
+            Some(ids) => ids,
+            None => self.picked.into_iter().collect(),
+        };
+        if ids.is_empty() {
+            return;
         }
+        if ids.len() == 1 {
+            self.remove(ids[0], cx);
+            return;
+        }
+        // One undo step for the whole span, like every other bulk action.
+        let mut group: Vec<(usize, Item)> = Vec::new();
+        for id in &ids {
+            if let Some(ix) = self.index_of(*id) {
+                if !self.items[ix].in_flight() {
+                    group.push((ix, self.items.remove(ix)));
+                }
+            }
+        }
+        if group.is_empty() {
+            return;
+        }
+        let n = group.len();
+        self.picked = self.items.first().map(|i| i.id);
+        self.multi.clear();
+        self.push_undo(Undo::Removed(group));
+        self.save_session();
+        self.flash(format!("Removed {n} files"), true, cx);
+        self.requeue(cx);
     }
 
     /// Space: open/close the picked row's options.
@@ -1087,7 +1594,7 @@ impl ConverterApp {
 
 /// Run a batch on a worker thread and stream its events back to the entity.
 fn spawn_batch(
-    jobs: Vec<(u64, PathBuf, Format, Format, CancelToken, Option<Options>)>,
+    jobs: Vec<(u64, PathBuf, Format, Format, CancelToken, Option<Options>, Option<PathBuf>)>,
     registry: Arc<Registry>,
     options: Options,
     mode: OutputMode,
@@ -1104,9 +1611,17 @@ fn spawn_batch(
         let formats: Vec<Format> = jobs.iter().map(|j| j.3).collect();
         let items: Vec<BatchItem> = jobs
             .into_iter()
-            .map(|(_, input, from, to, token, opts)| {
+            .map(|(_, input, from, to, token, opts, forced)| {
                 let root = roots.get(&input);
-                let output = files::output_path(&input, to, &mode, overwrite, &mut claimed, root.map(|p| p.as_path()));
+                let output = match forced {
+                    // "Save as…" wins over the folder/name plan, and still
+                    // claims the name so nothing else writes there.
+                    Some(path) => {
+                        claimed.insert(path.clone());
+                        path
+                    }
+                    None => files::output_path(&input, to, &mode, overwrite, &mut claimed, root.map(|p| p.as_path())),
+                };
                 let mut item = BatchItem::new(input, output, from, to);
                 item.cancel = Some(token);
                 item.options = opts;

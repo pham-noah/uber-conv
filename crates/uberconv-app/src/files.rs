@@ -6,7 +6,7 @@ use std::{
     sync::atomic::{AtomicIsize, Ordering},
 };
 
-use uberconv_core::Format;
+use uberconv_core::{Format, Options};
 
 use crate::settings::OutputMode;
 
@@ -289,6 +289,41 @@ pub fn flash_taskbar() {
         };
         FlashWindowEx(&info);
     }
+}
+
+/// Pixel size of an image, read from the file header rather than decoded:
+/// cheap enough to run over a whole queue of photos.
+pub fn image_dims(path: &Path) -> Option<(u32, u32)> {
+    image::image_dimensions(path).ok()
+}
+
+/// Rough output size in bytes, from the source's pixel count and the quality
+/// knob. This is the "≈ 340 KB" on a row: a rule of thumb, not a promise.
+pub fn estimate_size(to: Format, (w, h): (u32, u32), opts: &Options) -> Option<u64> {
+    let (mut w, mut h) = (f64::from(w), f64::from(h));
+    if let Some(max) = opts.image_max_dimension {
+        let scale = (f64::from(max) / w.max(h)).min(1.0);
+        w *= scale;
+        h *= scale;
+    }
+    let px = w * h;
+    if px < 1.0 {
+        return None;
+    }
+    let q = f64::from(opts.image_quality.clamp(1, 100)) / 100.0;
+    // Fitted to ordinary photographs: ~0.07 B/px at q75, ~0.15 at q90,
+    // ~0.25 at q100.
+    let jpeg = 0.0015 * (5.1 * q).exp();
+    let per_px = match to {
+        Format::Jpeg => jpeg,
+        Format::WebP => jpeg * 0.65,
+        Format::Avif => jpeg * 0.55,
+        Format::Png => 1.1,
+        Format::Tiff | Format::Bmp => 3.0,
+        Format::Gif => 0.35,
+        _ => return None,
+    };
+    Some((px * per_px) as u64)
 }
 
 #[cfg(test)]

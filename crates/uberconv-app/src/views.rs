@@ -10,7 +10,7 @@ use uberconv_core::{Family, Format};
 
 use crate::{
     actions::*,
-    app::{ConverterApp, Item, Relevant, SortKey, State},
+    app::{ConverterApp, Filter, Item, Relevant, SortKey, State},
     assets::FONT_FAMILY,
     files,
     settings::{OutputMode, ThemeChoice},
@@ -62,6 +62,44 @@ impl ConverterApp {
                     .tooltip(tip(hint))
                     .child(div().size(px(7.)).rounded_full().bg(dot))
                     .child(label),
+            )
+            .child(
+                // Theme, one click, right in the header — the icons were already
+                // shipped but only reachable two clicks into Settings.
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .p(px(2.))
+                    .rounded_lg()
+                    .bg(th::wash())
+                    .border_1()
+                    .border_color(th::line())
+                    .child(theme_button("theme-auto", "icons/monitor.svg", ThemeChoice::Auto, self.settings.theme, cx))
+                    .child(theme_button("theme-dark", "icons/moon.svg", ThemeChoice::Dark, self.settings.theme, cx))
+                    .child(theme_button("theme-light", "icons/sun.svg", ThemeChoice::Light, self.settings.theme, cx)),
+            )
+            .child(
+                div()
+                    .id("help-btn")
+                    .tab_index(0)
+                    .size(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(th::muted())
+                    .border_1()
+                    .border_color(th::line())
+                    .hover(|s| s.bg(th::wash_hi()).text_color(th::text()))
+                    .tooltip(tip("Keyboard shortcuts  (F1)"))
+                    .when(self.help_open, |b| b.bg(th::wash_hi()).text_color(th::text()))
+                    .child("?")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_help(cx))),
             )
             .child(
                 icon_button("settings-btn", "icons/settings.svg", format!("Settings  ({}, )", mod_key()))
@@ -204,10 +242,11 @@ impl ConverterApp {
         }
         let busy = self.busy;
         // While converting the bar stays (dimmed, inert) so the list below doesn't jump.
+        let filter = self.filter;
         let eligible: Vec<&Item> = self
             .items
             .iter()
-            .filter(|i| (busy || !i.in_flight()) && i.from.is_some() && !i.targets.is_empty())
+            .filter(|i| self.shown(i) && (busy || !i.in_flight()) && i.from.is_some() && !i.targets.is_empty())
             .collect();
         let mut counts: BTreeMap<Format, usize> = BTreeMap::new();
         for item in &eligible {
@@ -225,7 +264,7 @@ impl ConverterApp {
             .into_iter()
             .map(|(fmt, n)| {
                 let all_selected = eligible.iter().all(|i| i.is_selected(fmt));
-                format_chip(SharedString::from(format!("bulk-{}", fmt.ext())), fmt, all_selected)
+                format_chip(SharedString::from(format!("bulk-{}", fmt.ext())), fmt, all_selected, false)
                     .tooltip(tip(format!(
                         "Convert {n} of {total} file{} to {}",
                         if n == 1 { "" } else { "s" },
@@ -235,7 +274,174 @@ impl ConverterApp {
                     .into_any_element()
             })
             .collect();
-        let has_chips = !chips.is_empty();
+        if chips.is_empty() {
+            return None;
+        }
+
+        // Many images, one document: it belongs with the bulk verbs, not down
+        // in the footer where it made the row of buttons run off the window.
+        let images = self
+            .items
+            .iter()
+            .filter(|i| i.from.is_some_and(|f| f.family() == Family::Image) && !i.in_flight())
+            .count();
+        let combine = (images >= 2 && !busy && self.summary.is_none()).then(|| {
+            ghost_button("combine-pdf", format!("Combine {images} into PDF"), "icons/layers.svg")
+                .tooltip(tip("One page per image, in queue order"))
+                .on_click(cx.listener(|this, _, _, cx| this.combine_into_pdf(cx)))
+        });
+
+        Some(
+            div()
+                .flex()
+                .items_start()
+                .gap_3()
+                .px_3()
+                .py(px(10.))
+                .rounded_xl()
+                .bg(th::wash())
+                .border_1()
+                .border_color(th::line())
+                .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_start()
+                            .gap_3()
+                            .when(busy, |d| d.opacity(0.45))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .pt(px(4.))
+                                    .flex_none()
+                                    .child(icon("icons/layers.svg", 14., th::muted()))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(th::muted())
+                                            .child(match self.multi.len() {
+                                                0 => "Set all to".to_string(),
+                                                n => format!("Set {n} picked to"),
+                                            }),
+                                    ),
+                            )
+                            .child(div().flex_1().flex().flex_wrap().gap_2().children(chips))
+                            .children(combine),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Search box: a plain field, styled like the rest of the bar.
+    fn render_search(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let focused = self.search_focus.is_focused(window);
+        let empty = self.query.is_empty();
+        div()
+            .id("search")
+            .tab_index(0)
+            .track_focus(&self.search_focus)
+            .w(px(190.))
+            .h(px(26.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px(px(8.))
+            .rounded_md()
+            .border_1()
+            .border_color(if focused { th::with_alpha(th::VIOLET, 0xaa) } else { th::line() })
+            .bg(th::wash())
+            .cursor_text()
+            .text_xs()
+            .on_click(cx.listener(|this, _, window, cx| this.focus_search(window, cx)))
+            .on_key_down(cx.listener(|this, ev, _window, cx| this.search_key(ev, cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .when(empty, |d| d.text_color(th::faint()))
+                    .child(if empty {
+                        SharedString::from("Search files…")
+                    } else {
+                        SharedString::from(self.query.clone())
+                    }),
+            )
+            .when(empty, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .px(px(4.))
+                        .rounded(px(3.))
+                        .border_1()
+                        .border_color(th::line())
+                        .text_color(th::faint())
+                        .child("/"),
+                )
+            })
+            .when(!empty, |d| {
+                d.child(
+                    icon_button("search-clear", "icons/x.svg", "Clear the search")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.query.clear();
+                            this.rebuild_visible_public();
+                            cx.notify();
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Filters and sort, above the queue. The list, the footer count, the
+    /// scrollbar and "convert all" all follow what is picked here.
+    fn render_queue_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.items.len() < 2 {
+            return None;
+        }
+        let mut families: Vec<Family> = Vec::new();
+        for item in &self.items {
+            if let Some(fam) = item.from.map(|f| f.family()) {
+                if !families.contains(&fam) {
+                    families.push(fam);
+                }
+            }
+        }
+        families.sort_by_key(|f| f.name());
+
+        let mut chips: Vec<AnyElement> = vec![seg_button("filter-all".into(), format!("All {}", self.items.len()), self.filter == Filter::All)
+            .on_click(cx.listener(|this, _, _, cx| this.set_filter(Filter::All, cx)))
+            .into_any_element()];
+        for fam in families {
+            let n = self.items.iter().filter(|i| i.from.is_some_and(|f| f.family() == fam)).count();
+            if n == 0 {
+                continue;
+            }
+            chips.push(
+                seg_button(
+                    SharedString::from(format!("filter-{}", fam.name())),
+                    format!("{} {n}", fam.name()),
+                    self.filter == Filter::Family(fam),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_filter(Filter::Family(fam), cx)))
+                .into_any_element(),
+            );
+        }
+        let failed = self.items.iter().filter(|i| matches!(i.state, State::Failed(_))).count();
+        if failed > 0 {
+            chips.push(
+                seg_button(SharedString::from("filter-failed"), format!("Failed {failed}"), self.filter == Filter::Failed)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_filter(Filter::Failed, cx)))
+                    .into_any_element(),
+            );
+        }
+
+        // Built before the sort closures take their borrow of `cx`.
+        let search = self.render_search(window, cx);
 
         let sort_button = |key: SortKey, label: &'static str, hint: &'static str| {
             let active = self.sort.filter(|(k, _)| *k == key);
@@ -252,42 +458,24 @@ impl ConverterApp {
         Some(
             div()
                 .flex()
-                .items_start()
-                .gap_3()
-                .px_3()
-                .py(px(10.))
-                .rounded_xl()
-                .bg(th::wash())
-                .border_1()
-                .border_color(th::line())
-                .when(has_chips, |d| {
+                .items_center()
+                .gap_2()
+                .px(px(2.))
+                .child(search)
+                .when(self.filter != Filter::All || !self.query.is_empty(), |d| {
                     d.child(
                         div()
-                            .flex_1()
-                            .flex()
-                            .items_start()
-                            .gap_3()
-                            .when(busy, |d| d.opacity(0.45))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .pt(px(4.))
-                                    .flex_none()
-                                    .child(icon("icons/layers.svg", 14., th::muted()))
-                                    .child(
-                                        div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(th::muted()).child("Set all to"),
-                                    ),
-                            )
-                            .child(div().flex_1().flex().flex_wrap().gap_2().children(chips)),
+                            .text_xs()
+                            .text_color(th::faint())
+                            .child(format!("Showing {} of {} files", self.visible.len(), self.items.len())),
                     )
                 })
-                .when(!has_chips, |d| d.child(div().flex_1()))
+                .child(div().flex_1())
+                .child(div().flex().items_center().gap_1().children(chips))
+                .child(div().w(px(1.)).h(px(16.)).bg(th::line()))
                 .child(
                     div()
                         .flex()
-                        .flex_none()
                         .items_center()
                         .gap_1()
                         .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(th::muted()).pr_1().child("Sort"))
@@ -341,7 +529,7 @@ impl ConverterApp {
 
     /// Only the visible rows are built each frame, so thousands of files stay smooth.
     fn render_queue(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let thumb = Self::list_thumb(&self.list, self.items.len());
+        let thumb = Self::list_thumb(&self.list, self.visible.len());
         div()
             .relative()
             .flex_1()
@@ -364,13 +552,48 @@ impl ConverterApp {
             })
     }
 
-    fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&mut self, row: usize, cx: &mut Context<Self>) -> AnyElement {
         ROWS_BUILT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if ix >= self.items.len() {
+        let Some(&ix) = self.visible.get(row) else {
             return div().into_any_element();
-        }
+        };
         let card = self.render_item(&self.items[ix], cx);
         div().pb(px(12.)).pr(px(12.)).child(card).into_any_element()
+    }
+
+    /// The chevron that opens and closes a row's full format list.
+    fn chips_toggle(&self, item: &Item, picked: bool, cx: &mut Context<Self>) -> AnyElement {
+        let id = item.id;
+        let open = item.chips_open;
+        let hidden = item.targets.iter().filter(|f| !item.is_selected(**f)).count();
+        text_button(
+            SharedString::from(format!("more-{id}")),
+            if open { "Fewer formats".to_string() } else { format!("{hidden} more") },
+            Some(if open { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" }),
+            if open { "Show only the picked formats" } else { "Show every format this file can become" },
+        )
+        .when(!picked, |b| b.tab_stop(false))
+        .on_click(cx.listener(move |this, _, _, cx| this.toggle_chips(id, cx)))
+        .into_any_element()
+    }
+
+    /// One format chip for a row. Only the picked row's chips are tab stops:
+    /// in a long queue, tabbing through every chip of every file is unusable.
+    fn target_chip(&self, item: &Item, fmt: Format, tab: bool, cx: &mut Context<Self>) -> AnyElement {
+        let id = item.id;
+        let plan = item.from.and_then(|f| self.registry.plan(f, fmt));
+        let lossy = plan.as_ref().is_some_and(|p| p.is_lossy());
+        let route = plan.map(|p| p.describe()).unwrap_or_default();
+        let selected = item.is_selected(fmt);
+        format_chip(SharedString::from(format!("chip-{id}-{}", fmt.ext())), fmt, selected, lossy)
+            .when(!tab, |c| c.tab_stop(false))
+            .tooltip(tip(if selected {
+                format!("{route}\nClick to drop this output")
+            } else {
+                format!("{route}\nClick to add this output — a file can be converted to several formats at once")
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_target(id, fmt, cx)))
+            .into_any_element()
     }
 
     fn render_item(&self, item: &Item, cx: &mut Context<Self>) -> AnyElement {
@@ -395,7 +618,7 @@ impl ConverterApp {
         let in_flight = item.in_flight();
         let done = matches!(item.state, State::Done { .. });
         let multi_out = item.selected.len() > 1;
-        let picked = self.picked == Some(item.id);
+        let picked = self.picked == Some(item.id) || self.in_span(item.id);
         let relevant = Relevant::of(item);
         let has_custom = item.opts.is_some();
         let drag_label = SharedString::from(file_name.clone());
@@ -478,7 +701,9 @@ impl ConverterApp {
             status
         };
 
-        // Format chips, grouped by family when the list spans several.
+        // Formats: the targets you picked stay on the row, the rest of the list
+        // is one click away. A row that prints ten formats is a row you scroll
+        // past, so the queue reads as a list of decisions, not a wall of chips.
         let mut groups: Vec<(Family, Vec<Format>)> = Vec::new();
         for &f in &item.targets {
             match groups.last_mut() {
@@ -487,61 +712,60 @@ impl ConverterApp {
             }
         }
         let multi = groups.len() > 1;
-        let from = item.from;
-        let group_rows: Vec<AnyElement> = groups
-            .into_iter()
-            .map(|(fam, formats)| {
-                let chips: Vec<AnyElement> = formats
-                    .into_iter()
-                    .map(|fmt| {
-                        let route = from
-                            .and_then(|f| self.registry.plan(f, fmt))
-                            .map(|p| format!("{}{}", p.describe(), if p.is_lossy() { " (lossy)" } else { "" }))
-                            .unwrap_or_default();
-                        format_chip(
-                            SharedString::from(format!("chip-{id}-{}", fmt.ext())),
-                            fmt,
-                            item.is_selected(fmt),
-                        )
-                        .tooltip(tip(if item.is_selected(fmt) {
-                            format!("{route}\nClick to drop this output")
-                        } else {
-                            format!("{route}\nClick to add this output — a file can be converted to several formats at once")
-                        }))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_target(id, fmt, cx)))
-                        .into_any_element()
-                    })
-                    .collect();
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_2()
-                    .when(multi, |d| {
-                        d.child(
-                            div()
-                                .w(px(72.))
-                                .flex_none()
-                                .pt(px(5.))
-                                .text_size(px(10.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(th::faint())
-                                .child(fam.name().to_uppercase()),
-                        )
-                    })
-                    .child(div().flex_1().flex().flex_wrap().gap_2().children(chips))
-                    .into_any_element()
-            })
-            .collect();
+        let hidden = item.targets.iter().filter(|f| !item.is_selected(**f)).count();
+        let open = item.chips_open;
 
-        let mut tags: Vec<AnyElement> = Vec::new();
-        if let Some(p) = &plan {
-            if p.is_lossy() {
-                tags.push(
-                    tag(SharedString::from(format!("lossy-{id}")), "lossy", th::t().warn)
-                        .tooltip(tip("Some quality is lost with this target format. Pick a lossless one (PNG, WAV, FLAC…) to avoid that."))
+        // Expanded: every target, grouped by family.
+        let mut group_rows: Vec<AnyElement> = Vec::new();
+        if open {
+            for (fam, formats) in groups {
+                let chips: Vec<AnyElement> =
+                    formats.into_iter().map(|f| self.target_chip(item, f, picked, cx)).collect();
+                group_rows.push(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .when(multi, |d| {
+                            d.child(
+                                div()
+                                    .w(px(72.))
+                                    .flex_none()
+                                    .pt(px(5.))
+                                    .text_size(px(10.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(th::faint())
+                                    .child(fam.name().to_uppercase()),
+                            )
+                        })
+                        .child(div().flex_1().flex().flex_wrap().gap_2().children(chips))
                         .into_any_element(),
                 );
             }
+        }
+
+        // "≈ 340 KB": what this row will cost, before it runs.
+        let opts = item.opts.clone().unwrap_or_else(|| self.settings.options());
+        let estimate: Option<SharedString> = if in_flight || done || multi_out || open {
+            None
+        } else {
+            item.dims
+                .zip(item.primary())
+                .and_then(|(dims, to)| files::estimate_size(to, dims, &opts).map(|b| (b, to)))
+                .map(|(bytes, to)| SharedString::from(format!("≈ {} {}", files::human_size(bytes), to.name())))
+        };
+
+        let chips_open = open;
+        let picked_chips: Vec<AnyElement> = if open {
+            Vec::new()
+        } else {
+            item.selected.iter().map(|&f| self.target_chip(item, f, picked, cx)).collect()
+        };
+
+        let mut tags: Vec<AnyElement> = Vec::new();
+        if let Some(p) = &plan {
+            // No "lossy" tag: every chip carries its own "~", which is where the
+            // trade-off belongs once a file has more than one output.
             if p.len() > 1 {
                 let via: Vec<&str> = p.steps[..p.len() - 1].iter().map(|s| s.to.name()).collect();
                 tags.push(
@@ -554,6 +778,19 @@ impl ConverterApp {
                         .into_any_element(),
                 );
             }
+        }
+
+        if let Some(path) = &item.out_override {
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            tags.push(
+                tag(SharedString::from(format!("saveas-{id}")), format!("save as {name}"), th::CYAN)
+                    .tooltip(tip(format!(
+                        "Written to {}\nClick to go back to the output folder in Settings.",
+                        path.display()
+                    )))
+                    .on_click(cx.listener(move |this, _, _, cx| this.clear_out_override(id, cx)))
+                    .into_any_element(),
+            );
         }
 
         // Controls on the right of the status row.
@@ -600,6 +837,34 @@ impl ConverterApp {
                     .on_click(cx.listener(move |this, _, _, cx| this.retry(id, cx)))
                     .into_any_element(),
             ),
+            State::Ready if item.can_start() && !self.busy => {
+                // "Save as…" only on the row the keyboard is on: one file, one
+                // exact destination, without opening Settings.
+                if picked && !multi_out {
+                    actions.push(
+                        text_button(
+                            SharedString::from(format!("saveas-btn-{id}")),
+                            "Save as…",
+                            Some("icons/folder.svg"),
+                            "Choose exactly where this file goes",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.save_as(id, cx)))
+                        .into_any_element(),
+                    );
+                }
+                actions.push(
+                    text_button(
+                        SharedString::from(format!("go-{id}")),
+                        "Convert",
+                        Some("icons/play.svg"),
+                        "Convert just this file  (Enter)",
+                    )
+                    .text_color(th::text())
+                    .when(!picked, |b| b.tab_stop(false))
+                    .on_click(cx.listener(move |this, _, _, cx| this.start(Some(id), cx)))
+                    .into_any_element(),
+                );
+            }
             _ => {}
         }
 
@@ -629,14 +894,20 @@ impl ConverterApp {
             .id(SharedString::from(format!("card-{id}")))
             .flex()
             .flex_col()
-            .gap_3()
-            .p_4()
+            // Tight on purpose: the queue is a list, and a list you can only
+            // see three of is a list you scroll instead of reading.
+            .gap(px(8.))
+            .px(px(14.))
+            .py(px(11.))
             .rounded_xl()
             .bg(th::panel())
             .border_1()
             .when(picked, |d| d.border_color(th::with_alpha(th::VIOLET, 0xaa)))
             .when(!picked, |d| d.border_color(th::line()))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.pick(id, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| this.pick_with(id, ev.modifiers.shift, cx)),
+            )
             .drag_over::<DraggedItem>(|s, _, _, _| s.border_color(rgb(th::CYAN)))
             .on_drop(cx.listener(move |this, dragged: &DraggedItem, _, cx| this.move_item(dragged.id, id, cx)))
             // header row
@@ -697,20 +968,52 @@ impl ConverterApp {
                         )
                     }),
             )
-            // format picker
-            .when(!group_rows.is_empty(), |d| {
+            // format picker: the picked targets, then the rest on demand
+            .when(!item.targets.is_empty(), |d| {
                 d.child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(section_label("CONVERT TO"))
-                        .child(div().flex().flex_col().gap_2().children(group_rows)),
+                        .when(chips_open, |d| d.child(section_label("CONVERT TO")))
+                        // Collapsed: one line, the picked targets, the way out to
+                        // the rest. Expanded: the groups, then the way back.
+                        .when(!chips_open, |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .children(picked_chips)
+                                            .when(item.selected.is_empty(), |d| {
+                                                d.child(div().text_xs().text_color(th::faint()).child("No format picked yet"))
+                                            })
+                                            .when(hidden > 0, |d| d.child(self.chips_toggle(item, picked, cx))),
+                                    )
+                                    .when_some(estimate, |d, text| {
+                                        d.child(div().flex_none().text_xs().text_color(th::faint()).child(text))
+                                    }),
+                            )
+                        })
+                        .when(chips_open, |d| {
+                            d.child(div().flex().flex_col().gap_2().children(group_rows))
+                                .child(div().flex().child(self.chips_toggle(item, picked, cx)))
+                        }),
                 )
             })
             .children(options_panel)
-            // progress
-            .child(
+            // progress: a hairline until there is a bar to show
+            .child(if fraction <= 0.0 {
+                div().h(px(1.)).w_full().bg(th::line()).into_any_element()
+            } else {
                 div()
                     .h(px(6.))
                     .w_full()
@@ -724,8 +1027,9 @@ impl ConverterApp {
                             .rounded_full()
                             .when(done, |d| d.bg(th::good()))
                             .when(!done, |d| d.bg(th::brand(90.0))),
-                    ),
-            )
+                    )
+                    .into_any_element()
+            })
             // status row
             .child(
                 div()
@@ -909,7 +1213,11 @@ impl ConverterApp {
             div()
                 .text_sm()
                 .text_color(th::muted())
-                .child(format!("{total} file{}", if total == 1 { "" } else { "s" }))
+                .child(if self.visible.len() == total {
+                    format!("{total} file{}", if total == 1 { "" } else { "s" })
+                } else {
+                    format!("{} of {total} files", self.visible.len())
+                })
                 .into_any_element()
         };
 
@@ -938,21 +1246,17 @@ impl ConverterApp {
             .on_click(cx.listener(|this, _, _, cx| this.retry_failed(cx)))
         });
 
-        // Many images, one document: the reverse of PDF -> image.
-        let image_count = self.items.iter().filter(|i| i.from.is_some_and(|f| f.family() == Family::Image)).count();
-        let combine = (image_count >= 2 && !self.busy).then(|| {
-            ghost_button("combine-pdf", format!("Combine {image_count} into PDF"), "icons/layers.svg")
-                .tooltip(tip("One page per image, in queue order"))
-                .on_click(cx.listener(|this, _, _, cx| this.combine_into_pdf(cx)))
-        });
-
         let main_button: AnyElement = if self.busy {
             danger_button("cancel-all", "Cancel all", "icons/stop.svg")
                 .tooltip(tip(format!("Stop every running and queued file  ({k}.)")))
                 .on_click(cx.listener(|this, _, _, cx| this.cancel_all(cx)))
                 .into_any_element()
         } else {
-            let label = if convertible > 1 { format!("Convert all ({convertible})") } else { "Convert".to_string() };
+            let label = match self.multi.len() {
+                0 if convertible > 1 => format!("Convert all ({convertible})"),
+                0 => "Convert".to_string(),
+                n => format!("Convert {n} picked"),
+            };
             primary_button("convert", label, "icons/play.svg")
                 .tooltip(tip(format!("Start converting  ({k}Enter)")))
                 .when(!can_convert, |b| b.opacity(0.4))
@@ -960,24 +1264,142 @@ impl ConverterApp {
                 .into_any_element()
         };
 
+        // The buttons never move or clip: the line on the left gives way first.
         div()
             .flex()
             .items_center()
             .gap_2()
-            .child(left)
-            .child(div().flex_1())
-            .children(retry)
-            .children(combine)
-            .children(open_folder)
-            .child(clear)
-            .child(main_button)
+            // The padded column and this row disagree about where the right
+            // edge is; asking for it back keeps the primary button off the frame.
+            .pr(px(24.))
+            .child(div().flex_1().min_w_0().overflow_hidden().child(left))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(retry)
+                    .children(open_folder)
+                    .child(clear)
+                    .child(main_button),
+            )
+    }
+
+    // ───────────────────────── shortcuts sheet ─────────────────────────
+
+    /// F1 / "?": every key the app listens to, in one place. The legend used to
+    /// live only in the empty state, so it vanished the moment a file arrived.
+    fn render_help(&self, cx: &mut Context<Self>) -> AnyElement {
+        let k = mod_key();
+        let rows: Vec<(String, &'static str)> = vec![
+            (format!("{k}O"), "Add files"),
+            ("Enter".into(), "Convert the picked file"),
+            (format!("{k}Enter"), "Convert everything shown"),
+            ("↑ ↓".into(), "Move through the queue"),
+            ("Space".into(), "Options for the picked file"),
+            ("Del".into(), "Remove the picked file"),
+            (format!("{k}Z"), "Undo the last removal or \"set all\""),
+            (format!("{k}K"), "Clear finished files"),
+            (format!("{k},"), "Settings"),
+            (format!("{k}."), "Cancel everything"),
+            (format!("{k}Shift+C"), "Copy every error"),
+            ("F1".into(), "This sheet"),
+            ("Esc".into(), "Close a panel"),
+            ("Tab".into(), "Move between controls"),
+            ("/".into(), "Search file names and folders"),
+            ("Shift+click".into(), "Pick a range of rows"),
+            ("Shift+↑ ↓".into(), "Grow or shrink the range"),
+        ];
+        let rows: Vec<AnyElement> = rows
+            .into_iter()
+            .map(|(keys, what)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_none()
+                            .min_w(px(96.))
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .px(px(7.))
+                                    .py(px(2.))
+                                    .rounded_md()
+                                    .bg(th::wash())
+                                    .border_1()
+                                    .border_color(th::line())
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(th::muted())
+                                    .child(SharedString::from(keys)),
+                            ),
+                    )
+                    .child(div().text_sm().text_color(th::muted()).child(what))
+                    .into_any_element()
+            })
+            .collect();
+
+        div()
+            .id("help-overlay")
+            .occlude()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            // A dimmed backdrop: the sheet is a mode, and the queue behind it
+            // should not read as still usable.
+            .bg(th::with_alpha(th::t().ink, 0xb8))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.toggle_help(cx)))
+            .child(
+                div()
+                    .w(px(460.))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p(px(22.))
+                    .rounded_xl()
+                    .bg(th::raised())
+                    .border_1()
+                    .border_color(th::line())
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_base()
+                                    .font_weight(FontWeight::BOLD)
+                                    .child("Keyboard shortcuts"),
+                            )
+                            .child(
+                                icon_button("help-close", "icons/x.svg", "Close  (Esc)")
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_help(cx))),
+                            ),
+                    )
+                    .child(div().flex().flex_col().gap_2().children(rows))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(th::faint())
+                            .child("Drag files or folders anywhere on the window to add them."),
+                    ),
+            )
+            .into_any_element()
     }
 
     // ───────────────────────── settings panel ─────────────────────────
 
-    fn render_settings(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_settings(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = &self.settings;
-        let max_h = (f32::from(window.viewport_size().height) - 110.0).max(240.0);
 
         // Short controls sit next to their label; long ones go underneath.
         fn inline(label: &'static str, control: impl IntoElement) -> gpui::Div {
@@ -1157,17 +1579,20 @@ impl ConverterApp {
 
         let thumb = Self::scroll_thumb(&self.settings_scroll);
 
+        // A sheet, not a popover: full height at the right edge, so it reads as
+        // part of the window instead of a card floating over the queue.
         div()
             .id("settings-panel")
             .occlude()
             .absolute()
-            .top(px(84.))
-            .right(px(24.))
+            .top_0()
+            .right_0()
+            .h_full()
             .w(px(420.))
-            .max_h(px(max_h))
             .flex()
             .flex_col()
-            .rounded_xl()
+            .rounded_tl(px(18.))
+            .rounded_bl(px(18.))
             .bg(th::raised())
             .border_1()
             .border_color(th::line())
@@ -1246,6 +1671,27 @@ impl ConverterApp {
 /// with the virtualised list this stays at a handful however long the queue is.
 static ROWS_BUILT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+
+/// One header button of the theme switch. The tooltip names the choice so the
+/// icon alone is never the only thing saying what it does.
+fn theme_button(
+    id: &'static str,
+    path: &'static str,
+    choice: ThemeChoice,
+    current: ThemeChoice,
+    cx: &mut Context<ConverterApp>,
+) -> gpui::Stateful<gpui::Div> {
+    let hint = match choice {
+        ThemeChoice::Auto => "Theme: follow the system",
+        ThemeChoice::Dark => "Theme: dark",
+        ThemeChoice::Light => "Theme: light",
+    };
+    icon_button(id, path, hint)
+        .size(px(24.))
+        .when(current == choice, |b| b.bg(th::wash_hi()))
+        .on_click(cx.listener(move |this, _, _, cx| this.set_theme(choice, cx)))
+}
+
 fn short_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 90 {
@@ -1257,6 +1703,12 @@ fn short_duration(d: std::time::Duration) -> String {
 
 impl Render for ConverterApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let want: SharedString = self.window_title().into();
+        if want != self.title {
+            window.set_window_title(&want);
+            self.title = want;
+        }
+
         // Theme: follow the system unless the user picked one.
         let light = match self.settings.theme {
             ThemeChoice::Light => true,
@@ -1289,7 +1741,13 @@ impl Render for ConverterApp {
             .on_action(cx.listener(|this, _: &CancelAll, _, cx| this.cancel_all(cx)))
             .on_action(cx.listener(|this, _: &ClearFinished, _, cx| this.clear_finished(cx)))
             .on_action(cx.listener(|this, _: &ToggleSettings, _, cx| this.toggle_settings(cx)))
-            .on_action(cx.listener(|this, _: &CloseOverlay, _, cx| this.dismiss_settings(cx)))
+            .on_action(cx.listener(|this, _: &CloseOverlay, _, cx| {
+                if this.help_open {
+                    this.toggle_help(cx)
+                } else {
+                    this.dismiss_settings(cx)
+                }
+            }))
             .on_action(cx.listener(|_, _: &NextField, window, _| window.focus_next()))
             .on_action(cx.listener(|_, _: &PrevField, window, _| window.focus_prev()))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
@@ -1297,6 +1755,18 @@ impl Render for ConverterApp {
             .on_action(cx.listener(|this, _: &TogglePickedOptions, _, cx| this.toggle_picked_options(cx)))
             .on_action(cx.listener(|this, _: &CopyErrors, _, cx| this.copy_all_errors(cx)))
             .on_action(cx.listener(|this, _: &CombinePdf, _, cx| this.combine_into_pdf(cx)))
+            .on_action(cx.listener(|this, _: &ConvertPicked, _, cx| this.convert_picked(cx)))
+            .on_action(cx.listener(|this, _: &NextRow, _, cx| this.step_picked(1, false, cx)))
+            .on_action(cx.listener(|this, _: &PrevRow, _, cx| this.step_picked(-1, false, cx)))
+            .on_action(cx.listener(|this, _: &ExtendNextRow, _, cx| this.step_picked(1, true, cx)))
+            .on_action(cx.listener(|this, _: &ExtendPrevRow, _, cx| this.step_picked(-1, true, cx)))
+            .on_action(cx.listener(|this, _: &ToggleHelp, _, cx| this.toggle_help(cx)))
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)))
+            // The whole window takes a drop, not just the strip at the top.
+            .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(th::with_alpha(th::VIOLET, 0x1f)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.add_paths(paths.paths().to_vec(), cx);
+            }))
             // soft violet glow at the top of the window
             .child(
                 div().absolute().top_0().left_0().right_0().h(px(260.)).bg(linear_gradient(
@@ -1314,6 +1784,7 @@ impl Render for ConverterApp {
                     .p(px(24.))
                     .child(self.render_header(cx))
                     .child(self.render_drop_zone(has_items, cx))
+                    .children(self.render_queue_bar(window, cx))
                     .children(bulk)
                     .when(!has_items, |d| d.child(self.render_capabilities()))
                     .when(has_items, |d| d.child(self.render_queue(cx)).child(self.render_footer(cx))),
@@ -1344,6 +1815,7 @@ impl Render for ConverterApp {
                     ),
                 )
             })
+            .when(self.help_open, |d| d.child(self.render_help(cx)))
             .when(self.settings_open, |d| d.child(self.render_settings(window, cx)))
     }
 }

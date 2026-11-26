@@ -66,6 +66,27 @@ pub fn save_pdf(start: Option<PathBuf>, suggested: &str) -> Receiver<Option<Path
     })
 }
 
+/// "Save as…" for one file: where exactly should its output go?
+pub fn save_file(start: Option<PathBuf>, suggested: &str, ext: &str) -> Receiver<Option<PathBuf>> {
+    let (suggested, ext) = (suggested.to_string(), ext.to_string());
+    off_thread(move || {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save converted file as")
+            .add_filter(ext.to_uppercase(), &[ext.as_str()])
+            .set_file_name(&suggested);
+        if let Some(dir) = usable(&start) {
+            dialog = dialog.set_directory(dir);
+        }
+        let picked = dialog.save_file()?;
+        // rfd doesn't always append the extension the user typed around.
+        if picked.extension().is_none() {
+            Some(picked.with_extension(ext))
+        } else {
+            Some(picked)
+        }
+    })
+}
+
 /// The folder a picked path should be remembered by: its parent, or the path itself.
 pub fn folder_of(path: &Path) -> Option<PathBuf> {
     if path.is_dir() {

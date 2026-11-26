@@ -10,6 +10,7 @@ mod app;
 mod assets;
 mod dialogs;
 mod files;
+mod session;
 mod settings;
 mod theme;
 mod ui;
@@ -42,6 +43,15 @@ fn main() {
             KeyBinding::new("delete", RemovePicked, Some("ConverterApp")),
             KeyBinding::new("space", TogglePickedOptions, Some("ConverterApp")),
             KeyBinding::new("secondary-shift-c", CopyErrors, Some("ConverterApp")),
+            KeyBinding::new("enter", ConvertPicked, Some("ConverterApp")),
+            KeyBinding::new("down", NextRow, Some("ConverterApp")),
+            KeyBinding::new("up", PrevRow, Some("ConverterApp")),
+            KeyBinding::new("f1", ToggleHelp, Some("ConverterApp")),
+            KeyBinding::new("secondary-/", ToggleHelp, Some("ConverterApp")),
+            KeyBinding::new("/", FocusSearch, Some("ConverterApp")),
+            KeyBinding::new("secondary-f", FocusSearch, Some("ConverterApp")),
+            KeyBinding::new("shift-down", ExtendNextRow, Some("ConverterApp")),
+            KeyBinding::new("shift-up", ExtendPrevRow, Some("ConverterApp")),
         ]);
 
         let settings = Settings::load();
@@ -67,6 +77,9 @@ fn main() {
                         })
                         .detach();
                     // `uberconv-app a.png folder/` / "Open with" queues files at startup.
+                    // Whatever was staged last time comes back first, so a
+                    // dropped folder adds to the queue rather than replacing it.
+                    app.restore_session(cx);
                     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
                     if !args.is_empty() {
                         app.add_paths(args, cx);
@@ -75,7 +88,10 @@ fn main() {
                 });
                 let handle = app.clone();
                 window.on_window_should_close(cx, move |_, cx| {
-                    handle.update(cx, |app, _| app.settings.save());
+                    handle.update(cx, |app, _| {
+                        app.settings.save();
+                        app.save_session();
+                    });
                     true
                 });
                 app

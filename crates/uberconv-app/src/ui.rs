@@ -197,7 +197,9 @@ pub fn text_button(
 
 // ─────────────────────────── chips & segmented controls ───────────────────────────
 
-pub fn format_chip(id: SharedString, fmt: Format, selected: bool) -> Stateful<Div> {
+/// `lossy` puts a "~" inside the chip: with several outputs chosen, the trade
+/// off belongs on each target, not on the file.
+pub fn format_chip(id: SharedString, fmt: Format, selected: bool, lossy: bool) -> Stateful<Div> {
     let c = th::family_color(fmt.family());
     div()
         .id(id)
@@ -219,7 +221,9 @@ pub fn format_chip(id: SharedString, fmt: Format, selected: bool) -> Stateful<Di
                 .text_color(th::muted())
                 .hover(|s| s.bg(th::wash_hi()).text_color(th::text()))
         })
-        .child(fmt.name())
+        .child(div().flex().items_center().gap(px(4.)).child(fmt.name()).when(lossy, |d| {
+            d.child(div().text_color(th::warn()).child("~"))
+        }))
 }
 
 pub fn seg_button(id: SharedString, label: impl Into<SharedString>, selected: bool) -> Stateful<Div> {

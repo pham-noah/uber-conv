@@ -20,5 +20,17 @@ actions!(
         CopyErrors,
         /// Combine every image in the queue into one PDF.
         CombinePdf,
+        /// Enter — convert the row the keyboard is on, and only that row.
+        ConvertPicked,
+        /// Up / Down — walk the queue without the mouse.
+        NextRow,
+        PrevRow,
+        /// F1 — the keyboard sheet.
+        ToggleHelp,
+        /// "/" or Ctrl+F — put the cursor in the search box.
+        FocusSearch,
+        /// Shift+Down / Shift+Up — extend the picked span.
+        ExtendNextRow,
+        ExtendPrevRow,
     ]
 );
