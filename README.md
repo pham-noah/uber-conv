@@ -306,7 +306,7 @@ New formats are one line in the `formats!` table in `uberconv-core/src/format.rs
 
 ## Status
 
-* v0.3.0. All crates build and **57 tests pass** (engine, every converter, the
+* v0.3.0. All crates build and **56 tests pass** (engine, every converter, the
   CLI, and the app's queue, session, search, file and settings logic). Fixtures for EXIF, PDF, Word and archives were
   made by independent tools (PIL, python-docx, Python's zipfile/tarfile; see
   `crates/uberconv-formats/tests/fixtures/make_fixtures.py`), and outputs were
