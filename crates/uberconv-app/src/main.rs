@@ -52,6 +52,8 @@ fn main() {
             KeyBinding::new("secondary-f", FocusSearch, Some("ConverterApp")),
             KeyBinding::new("shift-down", ExtendNextRow, Some("ConverterApp")),
             KeyBinding::new("shift-up", ExtendPrevRow, Some("ConverterApp")),
+            KeyBinding::new("right", ChipNext, Some("ConverterApp")),
+            KeyBinding::new("left", ChipPrev, Some("ConverterApp")),
         ]);
 
         let settings = Settings::load();

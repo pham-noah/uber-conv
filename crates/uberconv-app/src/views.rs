@@ -242,7 +242,6 @@ impl ConverterApp {
         }
         let busy = self.busy;
         // While converting the bar stays (dimmed, inert) so the list below doesn't jump.
-        let filter = self.filter;
         let eligible: Vec<&Item> = self
             .items
             .iter()
@@ -579,7 +578,7 @@ impl ConverterApp {
 
     /// One format chip for a row. Only the picked row's chips are tab stops:
     /// in a long queue, tabbing through every chip of every file is unusable.
-    fn target_chip(&self, item: &Item, fmt: Format, tab: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn target_chip(&self, item: &Item, fmt: Format, tab: bool, cursor: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = item.id;
         let plan = item.from.and_then(|f| self.registry.plan(f, fmt));
         let lossy = plan.as_ref().is_some_and(|p| p.is_lossy());
@@ -587,6 +586,8 @@ impl ConverterApp {
         let selected = item.is_selected(fmt);
         format_chip(SharedString::from(format!("chip-{id}-{}", fmt.ext())), fmt, selected, lossy)
             .when(!tab, |c| c.tab_stop(false))
+            // The keyboard cursor, so arrows are visible and not a guess.
+            .when(cursor, |c| c.border_color(rgb(th::VIOLET)).bg(th::wash_hi()))
             .tooltip(tip(if selected {
                 format!("{route}\nClick to drop this output")
             } else {
@@ -644,7 +645,16 @@ impl ConverterApp {
                 th::warn(),
                 None,
             ),
-            State::Running(p) => (*p, format!("Converting… {}%", (p * 100.0) as u32), rgb(th::BLUE), None),
+            State::Running(p) => (
+                *p,
+                format!(
+                    "Converting… {}%{}",
+                    (p * 100.0) as u32,
+                    self.eta().map(|d| format!(" · ~{} left", short_duration(d))).unwrap_or_default()
+                ),
+                rgb(th::BLUE),
+                None,
+            ),
             State::Done { out, .. } => (
                 1.0,
                 format!(
@@ -718,9 +728,17 @@ impl ConverterApp {
         // Expanded: every target, grouped by family.
         let mut group_rows: Vec<AnyElement> = Vec::new();
         if open {
+            let cursor = if picked { self.chip_cursor } else { None };
+            let mut flat = 0usize;
             for (fam, formats) in groups {
-                let chips: Vec<AnyElement> =
-                    formats.into_iter().map(|f| self.target_chip(item, f, picked, cx)).collect();
+                let chips: Vec<AnyElement> = formats
+                    .into_iter()
+                    .map(|f| {
+                        let at = cursor == Some(flat);
+                        flat += 1;
+                        self.target_chip(item, f, picked, at, cx)
+                    })
+                    .collect();
                 group_rows.push(
                     div()
                         .flex()
@@ -759,7 +777,7 @@ impl ConverterApp {
         let picked_chips: Vec<AnyElement> = if open {
             Vec::new()
         } else {
-            item.selected.iter().map(|&f| self.target_chip(item, f, picked, cx)).collect()
+            item.selected.iter().map(|&f| self.target_chip(item, f, picked, false, cx)).collect()
         };
 
         let mut tags: Vec<AnyElement> = Vec::new();
@@ -1297,7 +1315,8 @@ impl ConverterApp {
             ("Enter".into(), "Convert the picked file"),
             (format!("{k}Enter"), "Convert everything shown"),
             ("↑ ↓".into(), "Move through the queue"),
-            ("Space".into(), "Options for the picked file"),
+            ("Space".to_string(), "Options for the picked file, or the format under the cursor"),
+            ("← →".to_string(), "Move along the format chips while a row is open"),
             ("Del".into(), "Remove the picked file"),
             (format!("{k}Z"), "Undo the last removal or \"set all\""),
             (format!("{k}K"), "Clear finished files"),
@@ -1758,6 +1777,8 @@ impl Render for ConverterApp {
             .on_action(cx.listener(|this, _: &ConvertPicked, _, cx| this.convert_picked(cx)))
             .on_action(cx.listener(|this, _: &NextRow, _, cx| this.step_picked(1, false, cx)))
             .on_action(cx.listener(|this, _: &PrevRow, _, cx| this.step_picked(-1, false, cx)))
+            .on_action(cx.listener(|this, _: &ChipNext, _, cx| this.step_chip(1, cx)))
+            .on_action(cx.listener(|this, _: &ChipPrev, _, cx| this.step_chip(-1, cx)))
             .on_action(cx.listener(|this, _: &ExtendNextRow, _, cx| this.step_picked(1, true, cx)))
             .on_action(cx.listener(|this, _: &ExtendPrevRow, _, cx| this.step_picked(-1, true, cx)))
             .on_action(cx.listener(|this, _: &ToggleHelp, _, cx| this.toggle_help(cx)))

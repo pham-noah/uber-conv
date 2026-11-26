@@ -261,6 +261,9 @@ pub struct ConverterApp {
     pub query: String,
     /// Shift-picked range: the rows "set all to" and Delete act on together.
     pub multi: Vec<u64>,
+    /// Position along the picked row's expanded format chips, moved with the
+    /// arrow keys so the list is not a mouse-only control.
+    pub chip_cursor: Option<usize>,
     /// A batch that would overwrite N existing files, waiting for a second
     /// click. Replacing a file is the one thing here that cannot be undone.
     pub confirm: Option<usize>,
@@ -307,6 +310,7 @@ impl ConverterApp {
             help_open: false,
             query: String::new(),
             multi: Vec::new(),
+            chip_cursor: None,
             confirm: None,
             search_focus: cx.focus_handle(),
             roots: HashMap::new(),
@@ -1426,10 +1430,6 @@ impl ConverterApp {
 
     // ───────────── row selection and bulk actions ─────────────
 
-    pub fn pick(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.settle(id, false, cx);
-    }
-
     pub fn pick_with(&mut self, id: u64, shift: bool, cx: &mut Context<Self>) {
         self.settle(id, shift, cx);
     }
@@ -1496,8 +1496,39 @@ impl ConverterApp {
         self.requeue(cx);
     }
 
+    /// ← →: walk the format chips of the picked row while its list is open.
+    pub fn step_chip(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(id) = self.picked else { return };
+        let Some(ix) = self.index_of(id) else { return };
+        let item = &self.items[ix];
+        if !item.chips_open || item.targets.is_empty() {
+            return;
+        }
+        let n = item.targets.len() as isize;
+        let next = match self.chip_cursor {
+            Some(c) => (c as isize + delta).clamp(0, n - 1),
+            // First press lands on the first chip the format list shows.
+            None => 0,
+        } as usize;
+        self.chip_cursor = Some(next);
+        cx.notify();
+    }
+
+    /// Turn the chip under the cursor on or off. Returns false when there is no
+    /// cursor, so Space can fall through to opening the row's options.
+    pub fn toggle_chip_at_cursor(&mut self, cx: &mut Context<Self>) -> bool {
+        let (Some(id), Some(cur)) = (self.picked, self.chip_cursor) else { return false };
+        let Some(ix) = self.index_of(id) else { return false };
+        let Some(fmt) = self.items[ix].targets.get(cur).copied() else { return false };
+        self.toggle_target(id, fmt, cx);
+        true
+    }
+
     /// Space: open/close the picked row's options.
     pub fn toggle_picked_options(&mut self, cx: &mut Context<Self>) {
+        if self.toggle_chip_at_cursor(cx) {
+            return;
+        }
         if let Some(id) = self.picked {
             self.toggle_options(id, cx);
         }

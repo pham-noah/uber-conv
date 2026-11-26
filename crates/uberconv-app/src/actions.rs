@@ -32,5 +32,8 @@ actions!(
         /// Shift+Down / Shift+Up — extend the picked span.
         ExtendNextRow,
         ExtendPrevRow,
+        /// ← / → — move along the picked row's format chips.
+        ChipPrev,
+        ChipNext,
     ]
 );
